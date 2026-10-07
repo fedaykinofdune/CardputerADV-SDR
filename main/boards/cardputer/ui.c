@@ -3,7 +3,8 @@
  * Each frame takes one snapshot (SEGMENTS x FFT_N samples), averages the
  * Hann-windowed FFT powers (Welch) and draws them. The UI only runs in the
  * command loop's idle slot and pauses while a USB host holds the serial
- * lease, so the browser viewer and host tools keep working unchanged. */
+ * lease, so the browser viewer and host tools keep working unchanged.
+ * Listen mode (listen.c) takes over the loop while it plays audio. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +51,11 @@ static struct {
 } cfg = {2437, 0, 3, 0, 1, 2, -1, -20, 70};
 
 static bool ok, paused, peak_hold = true, marker, help = true, dirty_axis = true, auto_ref = true;
-static bool host_shown, help_drawn;
+static bool host_shown, help_drawn, sniff;
+static int sniff_cycles = -1;
+static const char *note; /* one-off status message */
+static int64_t note_until;
+static unsigned listen_mark; /* kHz, 0: none */
 static int64_t next_frame, next_key, save_at;
 static float *win, *re, *im, *tw_re, *tw_im, *acc, *spec, *peak;
 static uint8_t *wf;
@@ -60,21 +65,27 @@ static char status_line[48], entry[8];
 static enum { MODE_RUN, MODE_FREQ, MODE_QUIT } mode;
 
 /* ---------- drawing helpers into the DMA strip ---------- */
-static void fill(uint16_t *buf, int w, int h, uint16_t c) {
+void cp_fill(uint16_t *buf, int w, int h, uint16_t c) {
     for (int i = 0; i < w * h; i++) buf[i] = c;
 }
-static void text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg) {
-    for (; *s; s++, x += 6) {
+/* 5x7 glyphs in a 6x8 cell, scaled up by an integer factor. */
+void cp_text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg, int scale) {
+    for (; *s; s++, x += 6 * scale) {
         unsigned ch = (unsigned char)*s;
         if (ch < 0x20 || ch > 0x7e) ch = '?';
-        for (int cx = 0; cx < 5; cx++) {
-            uint8_t col = cp_font5x7[ch - 0x20][cx];
-            for (int cy = 0; cy < 8; cy++) {
+        if (y + 8 * scale <= 0 || y >= h) continue;
+        for (int cx = 0; cx < 5 * scale; cx++) {
+            uint8_t col = cp_font5x7[ch - 0x20][cx / scale];
+            for (int cy = 0; cy < 8 * scale; cy++) {
                 int px = x + cx, py = y + cy;
-                if ((col >> cy) & 1 && px >= 0 && px < w && py >= 0 && py < h) buf[py * w + px] = fg;
+                if ((col >> (cy / scale)) & 1 && px >= 0 && px < w && py >= 0 && py < h) buf[py * w + px] = fg;
             }
         }
     }
+}
+#define fill cp_fill
+static void text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg) {
+    cp_text(buf, w, h, x, y, s, fg, 1);
 }
 static int text_w(const char *s) { return (int)strlen(s) * 6; }
 
@@ -144,8 +155,10 @@ static bool measure(void) {
             for (int n = 0; n < FFT_N; n++) {si += s10(p[n]); sq += s10(p[n] >> 10);}
         float mi = (float)si / FFT_N, mq = (float)sq / FFT_N;
         for (int n = 0; n < FFT_N; n++) {
+            /* Conjugate: on the S3, RF above the LO arrives at negative
+             * frequency (the web viewer and bridge do the same). */
             re[n] = (s10(p[n]) - mi) * win[n];
-            im[n] = (s10(p[n] >> 10) - mq) * win[n];
+            im[n] = (mq - s10(p[n] >> 10)) * win[n];
         }
         fft();
         for (int k = 0; k < FFT_N; k++) acc[k] += re[k] * re[k] + im[k] * im[k];
@@ -192,9 +205,10 @@ static void draw_status(bool host) {
     if (host) snprintf(line, sizeof(line), "%uMHz  USB host in control", (unsigned)cfg.freq);
     else if (mode == MODE_FREQ) snprintf(line, sizeof(line), "Tune to: %s_ MHz  [Enter]", entry);
     else if (mode == MODE_QUIT) snprintf(line, sizeof(line), "Reboot (Launcher)? y/n");
-    else snprintf(line, sizeof(line), "%uMHz %uM %s st%u%s%s", (unsigned)cfg.freq,
+    else if (note && esp_timer_get_time() < note_until) snprintf(line, sizeof(line), "%s", note);
+    else snprintf(line, sizeof(line), "%uMHz %uM %s st%u%s%s%s", (unsigned)cfg.freq,
                   spans[cfg.span].msps, gain, steps[cfg.step], paused ? " HOLD" : "",
-                  sdr_local_bandwidth() ? " BW" : "");
+                  sdr_local_bandwidth() ? " BW" : "", sniff ? " SNIFF" : "");
     if (!strcmp(line, status_line)) return;
     strcpy(status_line, line);
     uint16_t *b = cp_lcd_strip();
@@ -233,6 +247,8 @@ static void draw_spectrum(void) {
     uint16_t pk = cp_rgb(255, 200, 0), mk = cp_rgb(255, 80, 200);
     int mx = 0;
     for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
+    /* Listen frequency, when listen mode is on. */
+    int lx = listen_mark ? (int)lroundf((listen_mark / 1000.0f - cfg.freq) * FFT_N / spans[cfg.span].msps) + FFT_N / 2 - BIN0 : -1;
     uint16_t *b = cp_lcd_strip();
     for (int y0 = 0; y0 < SPEC_H; y0 += CP_STRIP_H) {
         int h = SPEC_H - y0 < CP_STRIP_H ? SPEC_H - y0 : CP_STRIP_H;
@@ -258,6 +274,8 @@ static void draw_spectrum(void) {
             }
             if (marker && x == mx)
                 for (int yy = 0; yy < h; yy++) if ((y0 + yy) % 3 == 0) b[yy * CP_LCD_W + x] = mk;
+            if (x == lx)
+                for (int yy = 0; yy < h; yy++) if ((y0 + yy) % 4 < 2) b[yy * CP_LCD_W + x] = cp_rgb(255, 40, 40);
         }
         if (marker && y0 == 0) {
             char s[24];
@@ -293,30 +311,30 @@ static void draw_waterfall(void) {
 
 static const char *const help_lines[] = {
     "ESP-SDR  Cardputer ADV",
-    ", /    tune -/+ step   ; .  step",
-    "f      type frequency (MHz)",
+    ", /  tune -/+ step   ; .  step",
+    "f    type MHz   s  span 80/40/16",
     "1-9 0  Wi-Fi ch 1-9, 0=ch13",
-    "s      span 80/40/16 MHz",
     "g - =  AGC / manual gain",
-    "b      RF filter auto/narrow",
-    "r      autoscale   [ ]  ref",
-    "a      averaging   p  peak",
-    "m      marker      d  DC fix",
-    "space  hold   o flip   q reboot",
+    "b    RF filter   r  autoscale",
+    "[ ]  ref level   a  averaging",
+    "m    marker      p  peak hold",
+    "d    DC fix      space  hold",
+    "l    LISTEN on speaker (marker)",
+    "n    sniffer tone  o flip  q quit",
     "USB host apps still work.",
 };
 
-static void draw_help(void) {
+void cp_ui_help(const char *const *lines, int n) {
     uint16_t *b = cp_lcd_strip();
-    const int n = sizeof(help_lines) / sizeof(help_lines[0]);
     for (int y0 = 0; y0 < CP_LCD_H; y0 += CP_STRIP_H) {
         int h = CP_LCD_H - y0 < CP_STRIP_H ? CP_LCD_H - y0 : CP_STRIP_H;
         fill(b, CP_LCD_W, h, cp_rgb(10, 12, 24));
         for (int i = 0; i < n; i++)
-            text(b, CP_LCD_W, h, 3, 3 + i * 11 - y0, help_lines[i], i ? cp_rgb(220, 230, 240) : cp_rgb(60, 255, 120));
+            text(b, CP_LCD_W, h, 3, 3 + i * 11 - y0, lines[i], i ? cp_rgb(220, 230, 240) : cp_rgb(60, 255, 120));
         cp_lcd_blit(0, y0, CP_LCD_W, h, b);
     }
 }
+static void draw_help(void) { cp_ui_help(help_lines, sizeof(help_lines) / sizeof(help_lines[0])); }
 
 /* ---------- input ---------- */
 static void changed(void) { save_at = esp_timer_get_time() + SAVE_US; }
@@ -329,6 +347,55 @@ static void retune(unsigned mhz) {
     changed();
 }
 static void restart_view(void) { status_line[0] = 0; dirty_axis = true; }
+
+/* ---------- listen mode and sniffer hooks ---------- */
+void cp_ui_frozen(unsigned listen_khz) {
+    listen_mark = listen_khz;
+    draw_axis();
+    draw_spectrum();
+}
+
+void cp_ui_resume(void) {
+    listen_mark = 0;
+    sdr_local_tune(cfg.freq);
+    memset(wf, 0, WF_H * CP_LCD_W); /* the IQ run used the ring banks */
+    restart_view();
+    next_frame = 0;
+    if (sniff && !cp_audio_start()) sniff = false;
+    sniff_cycles = -1;
+}
+
+static void say(const char *s) { note = s; note_until = esp_timer_get_time() + 3000000; }
+
+static void listen(void) {
+    int mx = 0;
+    for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
+    float mhz = marker && isfinite(spec[mx]) ? column_mhz(mx) : (float)cfg.freq;
+    if (!cp_listen_enter((unsigned)lroundf(mhz * 1000))) say("Speaker init failed");
+    status_line[0] = 0;
+}
+
+/* Pitch follows the strongest signal's height above the noise floor; a
+ * whole number of cycles per audio buffer keeps it click-free. */
+static void sniff_update(void) {
+    uint16_t hist[64] = {0}; /* 2 dB bins from -140 dBFS */
+    float top = -200;
+    for (int x = 0; x < CP_LCD_W; x++) {
+        if (!isfinite(spec[x])) return;
+        int bin = (int)((spec[x] + 140) / 2);
+        hist[bin < 0 ? 0 : bin > 63 ? 63 : bin]++;
+        if (spec[x] > top) top = spec[x];
+    }
+    int bin = 0;
+    for (unsigned seen = 0; bin < 63 && (seen += hist[bin]) < CP_LCD_W / 2; bin++) {}
+    float snr = top - (bin * 2 - 140);
+    int cycles = snr < 6 ? 0 : 2 + (int)((snr - 6) / 3); /* 130 Hz per cycle per buffer */
+    if (cycles > 23) cycles = 23;
+    if (cycles != sniff_cycles) {
+        sniff_cycles = cycles;
+        cp_audio_tone((unsigned)cycles * CP_AUDIO_RATE / 240, 6000);
+    }
+}
 
 static void key(int k) {
     if (help) {help = false; restart_view(); return;}
@@ -384,6 +451,13 @@ static void key(int k) {
     case 'o': cfg.flip = !cfg.flip; cp_lcd_flip(cfg.flip); restart_view(); changed(); break;
     case 'h': case '?': case CP_KEY_TAB: help = true; break;
     case 'q': mode = MODE_QUIT; break;
+    case 'l': listen(); break;
+    case 'n':
+        sniff = !sniff;
+        if (sniff && !cp_audio_start()) {sniff = false; say("Speaker init failed");}
+        if (!sniff) cp_audio_stop();
+        sniff_cycles = -1;
+        break;
     }
 }
 
@@ -429,10 +503,12 @@ void cardputer_init(void) {
 
 bool cardputer_step(bool host_active) {
     if (!ok) return false;
+    if (cp_listen_active()) {cp_listen_step(host_active); return true;}
     int64_t now = esp_timer_get_time();
     if (now >= next_key) {
         next_key = now + KEY_US;
-        for (int k; (k = cp_kbd_read());) key(k);
+        for (int k; !cp_listen_active() && (k = cp_kbd_read());) key(k);
+        if (cp_listen_active()) return true;
     }
     if (help) {
         if (!help_drawn) {draw_help(); help_drawn = true;}
@@ -449,7 +525,10 @@ bool cardputer_step(bool host_active) {
     if (host_active) {
         /* The host may retune; follow it so the display stays truthful. */
         cfg.freq = sdr_local_freq();
-        if (!host_shown) {host_shown = true; mode = MODE_RUN; status_line[0] = 0; draw_status(true);}
+        if (!host_shown) {
+            host_shown = true; mode = MODE_RUN; status_line[0] = 0; draw_status(true);
+            if (sniff) {sniff = false; cp_audio_stop();}
+        }
         return false;
     }
     if (host_shown) {
@@ -464,6 +543,7 @@ bool cardputer_step(bool host_active) {
         if (!measure()) return false;
         if (auto_ref && isfinite(spec[0])) {auto_ref = false; autoscale(); dirty_axis = true;}
         push_waterfall();
+        if (sniff) sniff_update();
     }
     draw_spectrum();
     draw_waterfall();

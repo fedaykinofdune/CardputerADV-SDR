@@ -66,10 +66,11 @@ set(board_includes)
 if(IDF_TARGET STREQUAL "esp32s3")
     # Cardputer ADV UI drivers. Requirements are resolved before Kconfig
     # values exist, so list them for every S3 build; unused code is dropped.
-    list(APPEND dependencies esp_lcd esp_driver_spi esp_driver_i2c)
+    list(APPEND dependencies esp_lcd esp_driver_spi esp_driver_i2c esp_driver_i2s)
 endif()
 if(CONFIG_ESP_SDR_CARDPUTER)
-    list(APPEND sources "boards/cardputer/ui.c" "boards/cardputer/lcd.c" "boards/cardputer/kbd.c")
+    list(APPEND sources "boards/cardputer/ui.c" "boards/cardputer/lcd.c" "boards/cardputer/kbd.c"
+                        "boards/cardputer/audio.c" "boards/cardputer/listen.c")
     list(APPEND board_includes "boards/cardputer")
 endif()
 

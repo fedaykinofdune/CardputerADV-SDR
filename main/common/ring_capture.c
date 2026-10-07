@@ -664,6 +664,7 @@ static struct {
 } iqs;
 static void iqs_flush(void);
 static inline void iqs_put(int32_t i, int32_t q);
+static void (*iqs_sink)(int32_t i, int32_t q); /* on-device consumer, NULL for USB */
 
 /* ---- decimating FIR for IQS (split I/Q arrays, PIE) -----------------------
  * D = 8 x (D/8) with D >= 64 (power of two): every window starts on a
@@ -810,6 +811,7 @@ IRAM_ATTR static void iqs_flush(void) {
     iqs.frame_index = iqs.out_index; iqs.fill = 0;
 }
 IRAM_ATTR static inline void iqs_put(int32_t i, int32_t q) {
+    if (iqs_sink) { iqs_sink(i, q); iqs.out_index++; return; }
     if (iqs.shift) { /* round to nearest: a plain shift floors and leaves a -0.5 LSB DC */
         int32_t h = 1 << (iqs.shift - 1); i = (i + h) >> iqs.shift; q = (q + h) >> iqs.shift;
     }
@@ -1350,6 +1352,7 @@ RING_HOT void ring_capture_run(const ring_config_t *cfg, ring_result_t *r) {
         }
         memset(&iqs, 0, offsetof(typeof(iqs), out));
         iqs.dec = d; iqs.log2d = l; iqs.bits = cfg->iq_bits; iqs.shift = cfg->iq_shift;
+        iqs_sink = cfg->iq_sink;
         fir_rot = cfg->iq_rot;
         iqs.next_pair = ~0ull;
         if (!iqs.out) {
@@ -1537,6 +1540,7 @@ RING_HOT void ring_capture_run(const ring_config_t *cfg, ring_result_t *r) {
                     stop = true;
                     r->stopped_by_host = true;
                 }
+                if (!stop && cfg->stop_poll && cfg->stop_poll()) stop = true;
                 if (!stop && !capture && ring_input_available()) {
                     stop = true;
                     r->stopped_by_host = true;
@@ -1729,7 +1733,9 @@ RING_HOT void ring_capture_run(const ring_config_t *cfg, ring_result_t *r) {
     REG_WRITE(DUMP_BANK_SELECT_REG, bank_sel_saved);
     r->elapsed_us = (uint64_t)(esp_timer_get_time() - t_start);
     r->pairs = index;
-    (void)host_input(); /* consume the stop request so the parser never sees it */
+    /* Consume the stop request so the parser never sees it; on-device runs
+     * leave host input for the command parser. */
+    if (!cfg->stop_poll) (void)host_input();
 #if !CONFIG_IDF_TARGET_ESP32S3
     if (spec) {
         while(scalar_work())txq_pump();
@@ -1760,6 +1766,9 @@ RING_HOT void ring_capture_run(const ring_config_t *cfg, ring_result_t *r) {
 #endif
     }
     portCLEAR_INTERRUPT_MASK_FROM_ISR(irq);
+#if CONFIG_IDF_TARGET_ESP32S3
+    iqs_sink = NULL;
+#endif
 
     /* Drain the queue with a deadline; the host may have stopped reading. */
     int64_t deadline = esp_timer_get_time() + 500000;

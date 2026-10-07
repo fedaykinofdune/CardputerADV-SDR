@@ -90,11 +90,13 @@ options, sample formats, filtering and frequency-offset tuning.
 
 <a id="cardputer-adv"></a>
 
-### **M5Stack Cardputer ADV**: on-device spectrum and waterfall
+### **M5Stack Cardputer ADV**: on-device spectrum, waterfall and audio
 
 The **`cardputer-adv`** firmware adds a standalone spectrum and waterfall view
-on the Cardputer ADV's screen, driven from its keyboard, on top of the standard
-S3 firmware. Host tools still work over USB. The build also produces a single
+on the Cardputer ADV's screen, driven from its keyboard, plus a listen mode
+that demodulates NFM, AM or WFM into the built-in speaker and a sniffer tone
+that rises with signal strength, on top of the standard S3 firmware. Host
+tools still work over USB. The build also produces a single
 `esp-sdr-cardputer-adv.bin` that installs from an SD card with
 [M5Launcher](https://github.com/bmorcelli/Launcher). See
 [Cardputer ADV keys, install and notes](docs/cardputer-adv.md).
@@ -207,8 +209,9 @@ See [H2 backend and validation](docs/esp32h2.md).
 - `main/common/`: burst serial transport, gain control, limits, and bandwidth
   helpers. The gain-table wrapper is linked only for C61 and S31.
 - `main/diagnostics/`: optional register probes, excluded from release exports.
-- `main/boards/cardputer/`: Cardputer ADV display, keyboard and on-device
-  spectrum UI, built only with `CONFIG_ESP_SDR_CARDPUTER`.
+- `main/boards/cardputer/`: Cardputer ADV display, keyboard, speaker,
+  on-device spectrum UI and listen-mode demodulator, built only with
+  `CONFIG_ESP_SDR_CARDPUTER`.
 - `platform/esp32s2/`: pinned ROM USB CDC compatibility component.
 
 The application component and UART configuration stay in `main/`. Target SDK

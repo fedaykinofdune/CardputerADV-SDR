@@ -1,22 +1,25 @@
 # M5Stack Cardputer ADV
 
 The `cardputer-adv` firmware is the standard ESP32-S3 burst firmware plus a
-standalone receiver on the Cardputer ADV's own screen and keyboard. It shows a
-live spectrum and waterfall without a computer, and still answers the normal
+standalone receiver on the Cardputer ADV's own screen, keyboard and speaker. It
+shows a live spectrum and waterfall without a computer, plays NFM/AM/WFM audio
+in listen mode, and still answers the normal
 serial protocol over native USB, so the browser viewer, `esp-sdr-bridge` and
 the S3 `IQS`/`SPEC` modes keep working when a host is plugged in.
 
 ![Cardputer ADV spectrum and waterfall layout (host-side render of the UI code with a synthetic test signal).](cardputer-adv-ui.png)
 
-**Preview:** built and checked in a host-side render only; not yet validated on
-hardware. Please report display orientation or keyboard mapping problems.
+**Preview:** the spectrum/waterfall build runs on a real Cardputer ADV via
+M5Launcher. Listen mode and the sniffer tone are new and checked in a
+host-side simulation of the demodulator only.
 
 ## Install
 
 - **M5Launcher (SD card):** copy `esp-sdr-cardputer-adv.bin` to the SD card and
   install it from Launcher's SD menu. Launcher reads the partition table in the
-  image and installs the app; the app-only `cardputer-adv/2-esp_sdr.bin` also
-  works.
+  image and installs the app. Use this merged image: the app-only
+  `cardputer-adv/2-esp_sdr.bin` has no bootloader and crashed when installed
+  on its own.
 - **USB:** flash `esp-sdr-cardputer-adv.bin` at offset `0x0` with any
   esptool-based flasher, or use `flash_args` from the artifact directory.
 
@@ -54,10 +57,46 @@ is idle between frames (snapshot spectrum, not gap-free).
 | `p` / `m` / `d` | Peak hold / peak marker / per-segment DC removal |
 | `space` | Hold the display |
 | `o` | Rotate the picture 180° |
+| `l` | Listen mode on the speaker, at the marker peak (marker on) or the centre |
+| `n` | Sniffer tone: pitch rises with the strongest signal's height above the noise |
 | `h`, `?`, `Tab` | Key help |
 | `q`, then `y` | Save settings and reboot (Launcher shows on boot) |
 
 Frequency, span, step, gain, scale and orientation persist in NVS.
+
+## Listen mode
+
+![Listen mode: frozen spectrum with the listen frequency in red, frequency, mode, signal bar and FM carrier offset (host-side render).](cardputer-adv-listen.png)
+
+`l` switches from snapshots to the S3 continuous IQ path (`IQS` mode 2): the
+LO sits 4 MHz below the listen frequency (FOFS gives 1 kHz steps), the
+two-stage FIR decimates 16 MS/s to 31.25 kS/s (250 kS/s for WFM), and core 1
+demodulates every sample straight into the ES8311 codec's I2S DMA ring.
+
+- **NFM** (±12.5 kHz channel, 3 kHz audio low-pass), **AM** (envelope,
+  normalised to the carrier, so it doubles as AGC), **WFM** (±100 kHz,
+  75 µs de-emphasis).
+- **Squelch** watches the demodulator's high-frequency noise, so it opens on
+  any clean carrier without a level setting; `sql 0` keeps it open.
+- **ofs** is the FM carrier's offset from the listen frequency: tune toward it.
+- The screen holds still while audio plays (the capture runs with interrupts
+  masked); any key ends the run, acts, and audio resumes. `v` adds a
+  once-per-second signal meter refresh, at the cost of a tiny audio skip.
+- A USB host command ends listen mode and the host takes over as usual.
+
+| Key | Action |
+| --- | --- |
+| `,` `/` (Fn: ← →) | Tune down / up by the step |
+| `;` `.` (Fn: ↑ ↓) | Step 1/5/10/25/100/1000 kHz |
+| `f` | Type a frequency in MHz with decimals, e.g. `2437.125` |
+| `m` | Mode NFM → AM → WFM |
+| `-` `=` | Volume (16 steps, about 3 dB each) |
+| `[` `]` | Squelch 0 (open) to 9 (tight) |
+| `v` | Live signal meter on/off |
+| `l`, `` ` `` | Back to the spectrum |
+| `h`, `?` | Listen help (audio keeps playing) |
+
+Mode, volume, squelch, step and the meter setting persist in NVS.
 
 ## With a host attached
 
@@ -73,11 +112,14 @@ after a host session.
 | Function | Pins |
 | --- | --- |
 | ST7789V2 135×240 LCD (SPI3) | MOSI 35, SCLK 36, CS 37, DC 34, RST 33, backlight 38 |
-| TCA8418 keyboard (I2C 0x34) | SDA 8, SCL 9, INT 11 (polled, unused) |
-| Reserved for SD and audio | 12, 14, 39–44, 46 |
+| TCA8418 keyboard (I2C 0x34) | SDA 8, SCL 9, INT 11 (ends listen-mode IQ runs) |
+| ES8311 codec (I2C 0x18) + I2S1 | BCLK 41, WS 43, DOUT 42 (MCLK derived from BCLK) |
+| Reserved for SD and IR | 12, 14, 39, 40, 44, 46 |
 
 UART0 is disabled because its default pins (43/44) belong to the audio codec
 and IR LED; native USB carries the protocol. The board pins are reserved before
 GPIO discovery, so `GPIO?` exposes only the free header/Grove pins. The SPI and
 I2C interrupt handlers run from flash so DRAM stays below the S3 RF ring
-(`sram_guard.ld`).
+(`sram_guard.ld`). Audio needs no interrupt: the I2S driver's DMA descriptors
+form a ring, and the writer reads the GDMA current-descriptor register to stay
+two buffers ahead of playback (8 × 7.7 ms buffers).

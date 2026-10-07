@@ -1,11 +1,16 @@
 /* Cardputer ADV keyboard: TCA8418 7x8 matrix scanner on the system I2C bus.
- * Key events are polled from its FIFO; the interrupt line is not needed. */
+ * Key events are polled from its FIFO; the interrupt line only ends IQ runs. */
 #include "cardputer.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_attr.h"
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 #include "esp_check.h"
 
 #define PIN_SDA 8
 #define PIN_SCL 9
+#define PIN_INT 11
 #define TCA8418_ADDR 0x34
 #define REG_CFG 0x01
 #define REG_INT_STAT 0x02
@@ -15,8 +20,9 @@
 #define REG_KP_GPIO_2 0x1E
 #define REG_KP_GPIO_3 0x1F
 
+static i2c_master_bus_handle_t bus;
 static i2c_master_dev_handle_t dev;
-static bool fn, shift, ready;
+static bool fn, shift, ready, irq_ok;
 
 /* Logical layout shared with the original Cardputer: 4 rows x 14 columns.
  * Each entry: plain, shifted, Fn layer. 0 marks modifiers/unused keys. */
@@ -53,7 +59,6 @@ void cp_kbd_init(void) {
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus;
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus));
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = TCA8418_ADDR, .scl_speed_hz = 400000,
@@ -64,10 +69,26 @@ void cp_kbd_init(void) {
             wr(REG_KP_GPIO_3, 0x00) == ESP_OK && wr(REG_CFG, 0x01) == ESP_OK;
     while (ready && rd(REG_KEY_EVENT_A) > 0) {}
     if (ready) wr(REG_INT_STAT, 0x03);
+    /* Open-drain, active low while key events are pending. */
+    const gpio_config_t irq = {.pin_bit_mask = 1ULL << PIN_INT, .mode = GPIO_MODE_INPUT,
+                               .pull_up_en = GPIO_PULLUP_ENABLE};
+    gpio_config(&irq);
 }
+
+void *cp_i2c_bus(void) { return bus; }
+
+/* Polled from the IQ run loop with interrupts masked: plain register read. */
+IRAM_ATTR bool cp_kbd_pending(void) {
+    return ready && !(REG_READ(GPIO_IN_REG) & (1u << PIN_INT));
+}
+
+/* True once a key event was seen with the interrupt line asserted, i.e. the
+ * line is wired and cp_kbd_pending can end an IQ run. */
+bool cp_kbd_irq_ok(void) { return irq_ok; }
 
 int cp_kbd_read(void) {
     if (!ready) return 0;
+    bool line = cp_kbd_pending();
     for (;;) {
         int count = rd(REG_KEY_LCK_EC);
         if (count <= 0 || !(count & 0x0f)) {
@@ -76,6 +97,7 @@ int cp_kbd_read(void) {
         }
         int ev = rd(REG_KEY_EVENT_A);
         if (ev <= 0) return 0;
+        if (line) irq_ok = true;
         bool pressed = ev & 0x80;
         unsigned raw = (unsigned)(ev & 0x7f) - 1u, r = raw / 10, c = raw % 10;
         /* Hardware row/column to the logical 4x14 grid (as M5Cardputer). */

@@ -224,8 +224,21 @@ const uint32_t *sdr_local_capture(unsigned n,unsigned divider) {
 }
 unsigned sdr_local_freq(void) { return frequency_mhz; }
 void sdr_local_tune(unsigned mhz) {
-    if(!rx_frequency_valid(mhz) || mhz==frequency_mhz)return;
-    frequency_mhz=mhz;rx_ready=false;prepare_rx();
+    if(!rx_frequency_valid(mhz) || (mhz==frequency_mhz && !s3_fofs))return;
+    frequency_mhz=mhz;s3_fofs=0;rx_ready=false;prepare_rx();
+}
+/* LO at 1 kHz resolution: whole MHz plus the FOFS PLL offset. */
+void sdr_local_tune_khz(unsigned khz) {
+    unsigned mhz=khz/1000;
+    if(!rx_frequency_valid(mhz))return;
+    frequency_mhz=mhz;s3_fofs=(int)(khz%1000);rx_ready=false;prepare_rx();
+}
+/* Continuous IQ run for an on-device consumer (cfg->iq_sink). */
+void sdr_local_iq_run(const ring_config_t *c,ring_result_t *r) {
+    prepare_rx();
+    rx_filter_apply();
+    ring_capture_run(c,r);
+    rx_filter_restore();
 }
 int sdr_local_gain(void) { return gain_mode==GAIN_HARDWARE?-1:(int)gain_code; }
 unsigned sdr_local_gain_max(void) { return gain_max(); }

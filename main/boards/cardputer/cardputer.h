@@ -2,11 +2,14 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "ring_capture.h"
 
 /* Receiver services (targets/esp32s3/receiver.c). */
 const uint32_t *sdr_local_capture(unsigned n, unsigned divider);
 unsigned sdr_local_freq(void);
-void sdr_local_tune(unsigned mhz);
+void sdr_local_tune(unsigned mhz); /* also clears any kHz offset */
+void sdr_local_tune_khz(unsigned khz);
+void sdr_local_iq_run(const ring_config_t *c, ring_result_t *r);
 int sdr_local_gain(void); /* -1: hardware AGC */
 unsigned sdr_local_gain_max(void);
 void sdr_local_set_gain(int code);
@@ -29,7 +32,36 @@ void cp_lcd_blit(int x, int y, int w, int h, const uint16_t *pixels);
 uint16_t *cp_lcd_strip(void); /* DMA scratch of CP_LCD_W * CP_STRIP_H pixels */
 #define CP_STRIP_H 16
 
+/* Speaker: ES8311 codec + I2S, 31.25 kHz mono (both channels). The DMA ring
+ * loops on its own, so cp_audio_put works with interrupts masked (core 1). */
+#define CP_AUDIO_RATE 31250
+bool cp_audio_init(void);
+bool cp_audio_start(void);
+void cp_audio_stop(void);
+void cp_audio_put(int32_t sample); /* IRAM; clipped to int16 */
+void cp_audio_pause(void); /* between runs: silence the already played part of the ring */
+void cp_audio_tone(unsigned hz, unsigned amplitude); /* refill the ring with a tone */
+
+/* Listen mode (listen.c): continuous FM/AM demodulation into the speaker.
+ * The screen holds still during an IQ run; any key ends the run, takes
+ * effect, and the run restarts. */
+bool cp_listen_enter(unsigned khz); /* false: speaker unavailable */
+bool cp_listen_active(void);
+void cp_listen_step(bool host_active);
+
+/* Shared with listen.c (ui.c). */
+void cp_fill(uint16_t *buf, int w, int h, uint16_t c);
+void cp_text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg, int scale);
+void cp_ui_help(const char *const *lines, int n);
+void cp_ui_frozen(unsigned listen_khz); /* last spectrum, marker at the listen frequency */
+void cp_ui_resume(void);                /* listen mode ended: back to the live spectrum */
+#define CP_PANEL_Y 68                   /* listen panel replaces the waterfall */
+
+bool cp_kbd_pending(void); /* IRAM; keyboard interrupt line asserted */
+bool cp_kbd_irq_ok(void);  /* the line was seen working */
+
 void cp_kbd_init(void);
+void *cp_i2c_bus(void); /* shared system I2C bus (i2c_master_bus_handle_t) */
 /* Returns the next pressed key as ASCII (or CP_KEY_*), 0 when none. */
 int cp_kbd_read(void);
 #define CP_KEY_ENTER '\n'

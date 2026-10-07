@@ -63,6 +63,12 @@ typedef struct {
     unsigned iq_bits;          /* IQ: 4, 8 or 16 bits per component */
     unsigned iq_shift;         /* IQ: rounding right shift of the FIR output (10-bit sample * 32) */
     bool iq_rot;               /* IQ: shift by +fs/4 before the FIR (LO tuned fs/4 below) */
+    /* IQ, on-device consumers (S3): every decimated sample goes to iq_sink
+     * instead of the USB frames. It may run on core 1 with interrupts masked,
+     * so it must be IRAM code on DRAM data. stop_poll (IRAM, core 0) ends the
+     * run when it returns true; host input then stays unread for the parser. */
+    void (*iq_sink)(int32_t i, int32_t q);
+    bool (*stop_poll)(void);
 } ring_config_t;
 
 typedef struct {
