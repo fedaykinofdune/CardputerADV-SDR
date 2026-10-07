@@ -54,6 +54,14 @@ def main():
     command.append('build')
     subprocess.run(command, env=env, check=True)
     export(build, output, profile['id'], profile['label'], args.version, profile['allow_larger_flash'])
+    if profile.get('launcher_image'):
+        # Single image from 0x0 (bootloader, partition table, app) for M5Launcher
+        # SD-card installs and one-file web flashers.
+        flash = (output / 'flash_args').read_text().split()
+        settings = flash[:6]
+        subprocess.run([sys.executable, '-m', 'esptool', '--chip', profile['target'], 'merge-bin',
+                        '-o', str(output / f"esp-sdr-{profile['id']}.bin")] + settings +
+                       [str(output / p) if i % 2 else p for i, p in enumerate(flash[6:])], check=True)
     provenance = {'profile': profile['id'], 'version': args.version, 'idf_commit': revision}
     (output / 'build-info.json').write_text(json.dumps(provenance, indent=2) + '\n')
     print(output)

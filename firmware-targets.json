@@ -50,6 +50,16 @@
       "preview": false
     },
     {
+      "id": "cardputer-adv",
+      "target": "esp32s3",
+      "label": "M5Stack Cardputer ADV (ESP32-S3, on-device spectrum/waterfall)",
+      "idf_ref": "25fe69f946311abdaf9ad56591f25fedbc20ac98",
+      "allow_larger_flash": true,
+      "preview": true,
+      "sdkconfig": "sdkconfig.defaults.cardputer-adv",
+      "launcher_image": true
+    },
+    {
       "id": "esp32s31",
       "target": "esp32s31",
       "label": "ESP32-S31 (2 MB or larger)",

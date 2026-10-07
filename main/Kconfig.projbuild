@@ -55,3 +55,18 @@ menu "ESP-SDR transport"
         default 44
 
 endmenu
+
+menu "ESP-SDR board"
+
+    config ESP_SDR_CARDPUTER
+        bool "M5Stack Cardputer ADV display and keyboard UI"
+        depends on IDF_TARGET_ESP32S3
+        default n
+        help
+            Adds a standalone spectrum and waterfall view on the Cardputer ADV
+            ST7789 display, controlled from its TCA8418 keyboard. The display
+            runs between serial commands and pauses while a USB host holds the
+            serial lease, so host tools keep working. Reserves the board's
+            display, keyboard, SD and audio pins.
+
+endmenu

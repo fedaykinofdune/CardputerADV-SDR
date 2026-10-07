@@ -26,6 +26,9 @@
 #include "rx_lo.h"
 #include "esp_rom_sys.h"
 #include "ring_capture.h"
+#if CONFIG_ESP_SDR_CARDPUTER
+#include "cardputer.h"
+#endif
 
 /* Vendor S3 adctrig uses the 64 KiB aperture at 0x3fcd0000 (MAC_DUMP_USAGE=4).
  * The continuous ring also uses the two banks below it. Keep all three, in
@@ -75,6 +78,9 @@ enum { rx_source=0,rx_mode=0,rx_flag=0,rx_wide=0,rx_prep=3,rx_pack=0,rx_agc=0 };
 #endif
 extern void force_rx_gain(unsigned,unsigned,unsigned);
 static int rx_filter=-1; /* -1 restores the PHY-calibrated automatic mode. */
+#if CONFIG_ESP_SDR_CARDPUTER
+static unsigned rx_filter_mhz;
+#endif
 extern unsigned rom_chip_i2c_readReg(unsigned,unsigned,unsigned);
 extern void rom_chip_i2c_writeReg(unsigned,unsigned,unsigned,unsigned);
 /* Apply only around an RX snapshot; restore before any retune. */
@@ -151,8 +157,9 @@ static unsigned probe_source,probe_clock,probe_adc=4;
 extern void rom_dac_rate_set(unsigned);
 static bool probe_capture;
 #endif
-static bool capture(unsigned n,unsigned divider,unsigned format) {
-    if(divider!=0 && divider!=1 && divider!=6){reply("ERR rate\n");return false;}
+/* Raw snapshot into IQ_BUFFER; returns NULL or the error reply. */
+static const char *capture_raw(unsigned n,unsigned divider,uint32_t *elapsed_us) {
+    if(divider!=0 && divider!=1 && divider!=6)return "ERR rate\n";
     prepare_rx();
     
     for(unsigned j=0;j<n;j++)IQ_BUFFER[j]=0xa5a0055au;
@@ -188,10 +195,17 @@ static bool capture(unsigned n,unsigned divider,unsigned format) {
 #ifdef SAMPLE_RATE_PROBE
     if(probe_adc<4)rom_chip_i2c_writeReg(0x66,0,4,adc_saved);
 #endif
-    if(!done){reply("ERR capture_timeout\n");return false;}
+    if(!done)return "ERR capture_timeout\n";
     for(unsigned j=0;j<n;j++) {
-        if(IQ_BUFFER[j]==0xa5a0055au){reply("ERR capture_timeout\n");return false;}
+        if(IQ_BUFFER[j]==0xa5a0055au)return "ERR capture_timeout\n";
     }
+    *elapsed_us=elapsed;
+    return NULL;
+}
+static bool capture(unsigned n,unsigned divider,unsigned format) {
+    uint32_t elapsed;
+    const char *err=capture_raw(n,divider,&elapsed);
+    if(err){reply(err);return false;}
     size_t bytes=wire_size(n,format);
     if(format==16)pack_iq8(n);else if(format==20)pack_iq(n);
     uint32_t crc=esp_rom_crc32_le(0,(const uint8_t *)IQ_BUFFER,bytes);
@@ -199,6 +213,33 @@ static bool capture(unsigned n,unsigned divider,unsigned format) {
     snprintf(h,sizeof(h),"DATA %u %08" PRIx32 " %" PRIu32 "\n",n,crc,elapsed);
     return send_bytes(h,strlen(h)) && send_bytes(IQ_BUFFER,bytes);
 }
+
+#if CONFIG_ESP_SDR_CARDPUTER
+/* Services for the on-device Cardputer UI. It runs in the command loop's
+ * idle slot, so it never overlaps a host transaction. */
+const uint32_t *sdr_local_capture(unsigned n,unsigned divider) {
+    uint32_t elapsed;
+    if(n<256 || n>IQ_WORDS || capture_raw(n,divider,&elapsed))return NULL;
+    return IQ_BUFFER;
+}
+unsigned sdr_local_freq(void) { return frequency_mhz; }
+void sdr_local_tune(unsigned mhz) {
+    if(!rx_frequency_valid(mhz) || mhz==frequency_mhz)return;
+    frequency_mhz=mhz;rx_ready=false;prepare_rx();
+}
+int sdr_local_gain(void) { return gain_mode==GAIN_HARDWARE?-1:(int)gain_code; }
+unsigned sdr_local_gain_max(void) { return gain_max(); }
+void sdr_local_set_gain(int code) {
+    if(code<0)gain_mode=GAIN_HARDWARE;
+    else {gain_mode=GAIN_MANUAL;gain_code=(unsigned)code;}
+    gain_reconfigure();
+}
+unsigned sdr_local_bandwidth(void) { return rx_filter<0?0:rx_filter_mhz; }
+void sdr_local_set_bandwidth(unsigned mhz) {
+    if(mhz && (mhz<RX_BANDWIDTH_MIN || mhz>RX_BANDWIDTH_MAX))return;
+    rx_filter=mhz?rx_bandwidth_dcap(mhz):-1;rx_filter_mhz=mhz;
+}
+#endif
 
 /* Continuous modes (ring_capture.c). Reports end with one text line:
  * <TAG> status detail units pairs elapsed_us late_max work_max_cycles
@@ -359,7 +400,11 @@ static void handle_command(char *line) {
                   "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 RING SPEC SPECN SPECCAPS SPECSTAT DCT\n");
         }
         else if(sscanf(line,"BANDWIDTH %u %c",&n,&extra)==1 && (!n || (n>=RX_BANDWIDTH_MIN && n<=RX_BANDWIDTH_MAX))) {
-            rx_filter=rx_bandwidth_dcap(n);reply("OK\n");
+            rx_filter=rx_bandwidth_dcap(n);
+#if CONFIG_ESP_SDR_CARDPUTER
+            rx_filter_mhz=n;
+#endif
+            reply("OK\n");
         }
         else if(!strcmp(line,"LPF AUTO")){rx_filter=-1;reply("OK\n");}
         else if(sscanf(line,"LPF %u %c",&n,&extra)==1 && n<=63){rx_filter=n;reply("OK\n");}
@@ -422,6 +467,10 @@ void app_main(void) {
     /* USB may be unplugged when the host uses the UART bridge. */
     (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
+#if CONFIG_ESP_SDR_CARDPUTER
+    /* Claims the display/keyboard pins before GPIO discovery parks the rest. */
+    cardputer_init();
+#endif
     burst_serial_init();
     ring_capture_init();
     char line[128];
@@ -430,7 +479,13 @@ void app_main(void) {
     for(;;) {
         if(esp_timer_get_time()>=lease_deadline)owner=-1;
         int status=burst_serial_poll_line(line,sizeof(line));
-        if(!status){vTaskDelay(1);continue;}
+        if(!status) {
+#if CONFIG_ESP_SDR_CARDPUTER
+            /* The display runs between commands and pauses while a host holds the lease. */
+            if(cardputer_step(owner>=0))continue;
+#endif
+            vTaskDelay(1);continue;
+        }
         int port=burst_serial_port();
         if(owner>=0 && owner!=port){reply("ERR busy\n");continue;}
         if(status<0){reply("ERR command_length\n");continue;}
