@@ -29,16 +29,33 @@ void cp_audio_tone(unsigned hz, unsigned amplitude); /* refill the ring with a t
 /* Listen mode (listen.c): continuous FM/AM demodulation into the speaker.
  * The screen holds still during an IQ run; any key ends the run, takes
  * effect, and the run restarts. */
-bool cp_listen_enter(unsigned khz); /* false: speaker unavailable */
+bool cp_listen_enter(unsigned khz, bool scan); /* false: speaker unavailable */
 bool cp_listen_active(void);
 void cp_listen_step(bool host_active);
+
+/* Scanner (scan.c): sweeps 2300-2483.5 MHz with burst snapshots and lists
+ * narrowband signals for listen mode's random hop (key j). */
+enum { CP_SCAN_NARROW, CP_SCAN_WIDEFM, CP_SCAN_DATA };
+typedef struct { unsigned khz; uint8_t kind, snr, pres; } cp_scan_hit_t;
+void cp_scan_begin(void);                          /* forget the list, start a sweep */
+bool cp_scan_sweep(unsigned *pass, unsigned *mhz); /* one window; true when the sweep is done */
+unsigned cp_scan_found(unsigned *left);            /* signals in the list, *left not yet played */
+bool cp_scan_next(cp_scan_hit_t *hit);             /* random unplayed pick; false: sweep again */
+void cp_scan_never(unsigned khz);                  /* never pick again (kept in NVS) */
+bool cp_scan_dead(unsigned khz);   /* a dead-carrier verdict; true: the STRIKES-th, now never picked again */
+void cp_scan_alive(unsigned khz);  /* it was modulated or keyed after all: forget the verdicts */
+const char *cp_scan_band(unsigned khz);
 
 /* Shared with listen.c (ui.c). */
 #define cp_fill sv_fill
 #define cp_text sv_text
 void cp_ui_help(const char *const *lines, int n);
 void cp_ui_frozen(unsigned listen_khz); /* last spectrum, marker at the listen frequency */
-void cp_ui_resume(void);                /* listen mode ended: back to the live spectrum */
+void cp_ui_resume(bool host);           /* listen mode ended: back to the live spectrum */
+/* The scanner's panorama replaces the spectrum (lo..hi kHz across the
+ * screen) until cp_ui_resume; returns the CP_LCD_W column levels to fill. */
+float *cp_ui_pano(unsigned lo_khz, unsigned hi_khz);
+void cp_ui_pano_scale(const float *db); /* fit ref level and range to CP_LCD_W levels */
 #define CP_PANEL_Y 68                   /* listen panel replaces the waterfall */
 
 bool cp_kbd_pending(void); /* IRAM; keyboard interrupt line asserted */

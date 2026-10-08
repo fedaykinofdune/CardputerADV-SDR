@@ -6,6 +6,7 @@ the Cardputer's screen, keyboard control, and audio out of its speaker.
 
 ![Spectrum and waterfall](docs/cardputer-adv-ui.png)
 ![Listen mode](docs/cardputer-adv-listen.png)
+![Scanner](docs/cardputer-adv-scan.png)
 
 This is a downstream of [ESPARGOS/esp-sdr](https://github.com/ESPARGOS/esp-sdr)
 (GPL-3.0), which found the undocumented debug path that exposes raw I/Q
@@ -25,9 +26,13 @@ share lives in `main/boards/common/`.
 
 - **Spectrum + waterfall** at 80, 40 or 16 MHz span, 100–6000 MHz tuning
   (the radio is happiest around 2.4 GHz), marker, peak hold, averaging.
-- **Listen mode** (`l`): continuous NFM, AM or WFM demodulation into the
+- **Listen mode** (`l`): continuous NFM, AM, WFM or CW demodulation into the
   speaker with 1 kHz tuning steps, noise squelch, volume, signal bar and FM
   carrier offset readout.
+- **Scanner** (`j`): sweeps 2300-2483.5 MHz (13 cm ham band and 2.4 GHz ISM),
+  picks a random busy narrowband signal, centres it, and plays it, switching
+  to CW for Morse beacons and skipping dead carriers. Keep pressing `j` to
+  hop. HF Morse and number stations are out of this radio's range.
 - **Sniffer tone** (`n`): a beep whose pitch rises with the strongest signal,
   handy for hunting a transmitter.
 - **USB host tools keep working**: the esp-sdr browser viewer and bridge take

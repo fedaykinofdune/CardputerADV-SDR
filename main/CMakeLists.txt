@@ -75,7 +75,8 @@ if(CONFIG_ESP_SDR_LOCAL_UI)
 endif()
 if(CONFIG_ESP_SDR_CARDPUTER)
     list(APPEND sources "boards/cardputer/ui.c" "boards/cardputer/lcd.c" "boards/cardputer/kbd.c"
-                        "boards/cardputer/audio.c" "boards/cardputer/listen.c")
+                        "boards/cardputer/audio.c" "boards/cardputer/listen.c"
+                        "boards/cardputer/scan.c")
     list(APPEND board_includes "boards/cardputer")
 endif()
 if(CONFIG_ESP_SDR_TDONGLE)

@@ -53,6 +53,8 @@ static int sniff_cycles = -1;
 static const char *note; /* one-off status message */
 static int64_t note_until;
 static unsigned listen_mark; /* kHz, 0: none */
+static unsigned pano_lo, pano_hi; /* kHz; the scanner's panorama is on screen while pano_hi */
+static int8_t user_ref, user_range; /* the spectrum's scale, back after the panorama */
 static int64_t next_frame, next_key, save_at;
 static float *spec, *peak;
 static uint8_t *wf;
@@ -90,7 +92,14 @@ static void autoscale(void) {
 }
 
 /* ---------- screens ---------- */
-static float column_mhz(int x) { return sv_bin_mhz(cfg.freq, cfg.span, (float)x); }
+static float column_mhz(int x) {
+    if (pano_hi) return (pano_lo + (float)x * (pano_hi - pano_lo) / CP_LCD_W) / 1000;
+    return sv_bin_mhz(cfg.freq, cfg.span, (float)x);
+}
+static float mhz_column(float mhz) {
+    if (pano_hi) return (mhz * 1000 - pano_lo) * CP_LCD_W / (pano_hi - pano_lo);
+    return sv_mhz_bin(cfg.freq, cfg.span, mhz);
+}
 
 static void draw_status(bool host) {
     char line[48], gain[8];
@@ -142,7 +151,7 @@ static void draw_spectrum(void) {
     int mx = 0;
     for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
     /* Listen frequency, when listen mode is on. */
-    int lx = listen_mark ? (int)lroundf(sv_mhz_bin(cfg.freq, cfg.span, listen_mark / 1000.0f)) : -1;
+    int lx = listen_mark ? (int)lroundf(mhz_column(listen_mark / 1000.0f)) : -1;
     uint16_t *b = cp_lcd_strip();
     for (int y0 = 0; y0 < SPEC_H; y0 += CP_STRIP_H) {
         int h = SPEC_H - y0 < CP_STRIP_H ? SPEC_H - y0 : CP_STRIP_H;
@@ -162,7 +171,7 @@ static void draw_spectrum(void) {
                 if (yl > bot) *p = fillc;
                 if (yl >= top && yl <= bot) *p = line;
             }
-            if (peak_hold) {
+            if (peak_hold && !pano_hi) {
                 int py = db_to_y(peak[x]) - y0;
                 if (py >= 0 && py < h) b[py * CP_LCD_W + x] = pk;
             }
@@ -213,7 +222,7 @@ static const char *const help_lines[] = {
     "[ ]  ref level   a  averaging",
     "m    marker      p  peak hold",
     "d    DC fix      space  hold",
-    "l    LISTEN on speaker (marker)",
+    "l    listen (marker)  j  scan",
     "n    sniffer tone  o flip  q quit",
     "USB host apps still work.",
 };
@@ -249,9 +258,29 @@ void cp_ui_frozen(unsigned listen_khz) {
     draw_spectrum();
 }
 
-void cp_ui_resume(void) {
+float *cp_ui_pano(unsigned lo_khz, unsigned hi_khz) {
+    if (!pano_hi) {user_ref = cfg.ref_db; user_range = cfg.range_db;}
+    pano_lo = lo_khz;
+    pano_hi = hi_khz;
+    return spec;
+}
+
+void cp_ui_pano_scale(const float *db) {
+    float scratch[CP_LCD_W];
+    sv_autoscale(db, CP_LCD_W, scratch, &cfg.ref_db, &cfg.range_db);
+}
+
+void cp_ui_resume(bool host) {
     listen_mark = 0;
-    sdr_local_tune(cfg.freq);
+    if (pano_hi) {
+        pano_hi = pano_lo = 0;
+        cfg.ref_db = user_ref;
+        cfg.range_db = user_range;
+        for (int x = 0; x < CP_LCD_W; x++) spec[x] = peak[x] = NAN;
+        paused = false; /* nothing to hold: the next frame refills the view */
+    }
+    /* A host that took over keeps its frequency, minus listen's kHz offset. */
+    sdr_local_tune(host ? sdr_local_freq() : cfg.freq);
     memset(wf, 0, WF_H * CP_LCD_W); /* the IQ run used the ring banks */
     restart_view();
     next_frame = 0;
@@ -273,7 +302,12 @@ static void listen(void) {
     int mx = 0;
     for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
     float mhz = marker && isfinite(spec[mx]) ? column_mhz(mx) : (float)cfg.freq;
-    if (!cp_listen_enter((unsigned)lroundf(mhz * 1000))) say_speaker_failed();
+    if (!cp_listen_enter((unsigned)lroundf(mhz * 1000), false)) say_speaker_failed();
+    status_line[0] = 0;
+}
+
+static void scan(void) {
+    if (!cp_listen_enter(cfg.freq * 1000u, true)) say_speaker_failed();
     status_line[0] = 0;
 }
 
@@ -299,7 +333,10 @@ static void sniff_update(void) {
     }
 }
 
+static bool host_now; /* a host is driving the radio: no local captures */
+
 static void key(int k) {
+    if (host_now && (k == 'l' || k == 'j' || k == 'n')) return;
     if (help) {help = false; restart_view(); return;}
     if (mode == MODE_FREQ) {
         size_t n = strlen(entry);
@@ -354,6 +391,7 @@ static void key(int k) {
     case 'h': case '?': case CP_KEY_TAB: help = true; break;
     case 'q': mode = MODE_QUIT; break;
     case 'l': listen(); break;
+    case 'j': scan(); break;
     case 'n':
         sniff = !sniff;
         if (sniff && !cp_audio_start()) {sniff = false; say_speaker_failed();}
@@ -402,6 +440,7 @@ void board_ui_init(void) {
 bool board_ui_step(bool host_active) {
     if (!ok) return false;
     if (cp_listen_active()) {cp_listen_step(host_active); return true;}
+    host_now = host_active;
     int64_t now = esp_timer_get_time();
     if (now >= next_key) {
         next_key = now + KEY_US;
