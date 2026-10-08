@@ -48,13 +48,16 @@ NVS.
 
 **SPEC**: spectrum and waterfall. It opens on the whole 2.4 GHz band (2442
 MHz, 80 MHz span). Each tap zooms onto the strongest signal: 80 → 40 → 16 MHz
-span, then back to the whole band. The top line shows centre, span and the
-peak's frequency and level. The peak is taken from the smoothed spectrum, so
-a single Bluetooth hop does not steal the zoom.
+span, then back to the whole band. The signal lands an eighth of the span
+right of centre, because the DC-offset removal would also cancel a carrier
+sitting exactly on the tuned frequency. The top line shows centre, span and
+the peak's frequency and level. The peak is taken from the smoothed spectrum,
+so a single Bluetooth hop does not steal the zoom.
 
 **CHAN**: Wi-Fi airtime survey for channels 1–13. Every frame captures the
 whole band. A channel counts as busy when the mean power over its central 16
-MHz is 5 dB above the band's noise floor. Bars show the share of busy frames
+MHz is 5 dB above the noise floor, taken as the quietest tenth of the band so
+that it still holds when channels 1, 6 and 11 are all on air. Bars show the share of busy frames
 since the last reset (green under 20 %, yellow under 50 %, red above), and
 the white tick on each bar is the recent airtime. The quietest of channels 1,
 6 and 11 is highlighted as **best**. The seconds counter is the survey time.
@@ -63,7 +66,8 @@ Tap resets the survey.
 **HUNT**: a meter for finding a transmitter. It shows the strongest signal's
 level in dBFS, its height above the noise floor (SNR), its frequency, and an
 SNR bar with a decaying peak tick. Tap locks onto the current peak frequency
-(±2 bins), so other signals can't take over the meter; tap again to unlock.
+(±2 bins), so other signals can't take over the meter. Tap again, or leave
+HUNT, to unlock.
 HUNT uses SPEC's zoom, so zoom in on SPEC first for a narrower view.
 
 **LED**: the colour follows the strongest signal's SNR, from blue (quiet)
@@ -75,8 +79,9 @@ at the screen. Purple means a USB host is in control.
 
 As on the Cardputer, the display runs only between serial commands. When a
 host sends a command it takes the serial lease, the screen reads **USB host
-in control** and the LED turns purple. The display resumes five seconds after
-the host goes quiet. The waterfall borrows ring bank 0, so it restarts after
+in control** with the host's frequency, and the LED turns purple. Button
+presses are ignored meanwhile. The display resumes five seconds after the
+host goes quiet and retunes to its own view. The waterfall borrows ring bank 0, so it restarts after
 a host session.
 
 The QWIIC connector is UART0 (TX 43, RX 44) and carries the same protocol at

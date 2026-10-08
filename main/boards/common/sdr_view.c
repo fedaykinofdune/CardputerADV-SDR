@@ -64,7 +64,8 @@ const float *sv_measure(unsigned span, bool dc_fix) {
     for (int s = 0; s < SV_SEGMENTS; s++) {
         const uint32_t *p = w + s * SV_FFT_N;
         /* The LO leaks a DC offset; removing each segment's mean takes it
-         * out without notching real signals at the centre frequency. */
+         * out. Wideband signals at the centre survive, but a carrier within
+         * about one bin of the LO is cancelled with it. */
         int si = 0, sq = 0;
         if (dc_fix)
             for (int n = 0; n < SV_FFT_N; n++) {si += s10(p[n]); sq += s10(p[n] >> 10);}

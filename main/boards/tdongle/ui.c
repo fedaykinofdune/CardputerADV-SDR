@@ -53,7 +53,8 @@ static struct {
 
 static bool ok, host_shown, help = true;
 static int64_t next_frame, save_at, hint_until, press_at, next_scale;
-static unsigned tuned;       /* MHz the receiver is on, 0: unknown */
+static bool press_void; /* press overlapped a host session: no action */
+static unsigned host_freq; /* frequency on the host screen */
 static unsigned view_centre; /* view the smoothed data belongs to */
 static uint8_t view_span;
 static float *bins, *cols, *scratch;
@@ -238,11 +239,13 @@ static void draw_hunt(void) {
     }
 }
 
-static void draw_host(void) {
+/* Whole screen, or only the strip holding the frequency (y 32-47). */
+static void draw_host(bool freq_only) {
     char s[32];
     uint16_t *b = td_lcd_strip();
-    snprintf(s, sizeof(s), "%u MHz", sdr_local_freq());
-    for (int y0 = 0; y0 < H; y0 += TD_STRIP_H) {
+    host_freq = sdr_local_freq();
+    snprintf(s, sizeof(s), "%u MHz", host_freq);
+    for (int y0 = freq_only ? 32 : 0; y0 < (freq_only ? 48 : H); y0 += TD_STRIP_H) {
         int h = H - y0 < TD_STRIP_H ? H - y0 : TD_STRIP_H;
         sv_fill(b, W, h, rgb(10, 12, 24));
         text(b, h, 2, 24 - y0, "USB host in control", rgb(255, 210, 0));
@@ -260,8 +263,21 @@ static void hue(float t, uint8_t *r, uint8_t *g, uint8_t *b) {
     else {float f = (t - 0.66f) / 0.34f; *r = 255; *g = (uint8_t)(255 * (1 - f)); *b = 0;}
 }
 
+/* Noise floor for the survey: the 10th percentile of the band. The median
+ * lands inside the signals when channels 1, 6 and 11 are all on air (their
+ * central 16 MHz covers ~63 % of the bins), which would read as idle. */
+static float survey_floor(const float *db) {
+    const int k = SV_BINS / 10;
+    memcpy(scratch, db, SV_BINS * sizeof(float));
+    for (int i = 0; i <= k; i++)
+        for (int j = i + 1; j < SV_BINS; j++)
+            if (scratch[j] < scratch[i]) {float t = scratch[i]; scratch[i] = scratch[j]; scratch[j] = t;}
+    return scratch[k];
+}
+
 static void survey(const float *db) {
     int64_t now = esp_timer_get_time();
+    const float busy_db = survey_floor(db) + 5;
     if (survey_last) survey_us += now - survey_last < 200000 ? now - survey_last : 200000;
     survey_last = now;
     frames++;
@@ -273,7 +289,7 @@ static void survey(const float *db) {
         if (z > SV_BINS - 1) z = SV_BINS - 1;
         float p = 0;
         for (int i = a; i <= z; i++) p += powf(10, db[i] / 10);
-        bool busy = 10 * log10f(p / (z - a + 1)) > floor_db + 5;
+        bool busy = 10 * log10f(p / (z - a + 1)) > busy_db;
         busy_frames[c] += busy;
         live[c] += ((float)busy - live[c]) * 0.05f;
     }
@@ -290,7 +306,9 @@ static bool measure(void) {
     /* CHAN always needs the whole band; SPEC and HUNT use the zoomed view. */
     unsigned centre = cfg.page == PAGE_CHAN ? BAND_MHZ : cfg.centre;
     uint8_t span = cfg.page == PAGE_CHAN ? 0 : cfg.span;
-    if (tuned != centre) {sdr_local_tune(centre); tuned = centre;}
+    /* Every frame: a no-op when already there, and it undoes any retune or
+     * FOFS offset a host left behind, even one never seen as host_active. */
+    sdr_local_tune(centre);
     if (centre != view_centre || span != view_span) {
         view_centre = centre; view_span = span;
         for (int i = 0; i < SV_BINS; i++) bins[i] = NAN;
@@ -349,10 +367,13 @@ static void tap(void) {
     if (cfg.page == PAGE_CHAN) {reset_survey(); return;}
     if (!view_centre) return; /* nothing measured yet (help screen, host at boot) */
     if (cfg.page == PAGE_SPEC) {
-        /* Zoom onto the strongest signal; from 16 MHz back to the whole band. */
+        /* Zoom onto the strongest signal; from 16 MHz back to the whole band.
+         * The target goes 1/8 span right of the LO: removing each segment's
+         * mean (the LO leak) would also cancel a carrier sitting on DC. */
         if (cfg.span + 1 < SV_SPANS) {
-            float f = sv_bin_mhz(view_centre, view_span, (float)peak_bin);
-            cfg.centre = (uint16_t)lroundf(f);
+            float f = sv_bin_mhz(view_centre, view_span, (float)peak_bin) - sv_spans[cfg.span + 1].msps / 8.0f;
+            long c = lroundf(f);
+            cfg.centre = (uint16_t)(c < 100 ? 100 : c > 6000 ? 6000 : c);
             cfg.span++;
         } else {
             cfg.centre = BAND_MHZ;
@@ -366,6 +387,7 @@ static void tap(void) {
 }
 
 static void next_page(void) {
+    lock_mhz = 0; /* the lock belongs to HUNT, which is being left */
     cfg.page = (uint8_t)((cfg.page + 1) % PAGES);
     hint_until = esp_timer_get_time() + HINT_US;
     level_peak = -200;
@@ -373,16 +395,18 @@ static void next_page(void) {
 }
 
 /* Returns a status line while the button is held, NULL otherwise. */
-static const char *button(int64_t now) {
+static const char *button(int64_t now, bool host_active) {
     bool down = td_button_down();
     if (down && !press_at) press_at = now;
     if (!press_at) return NULL;
+    if (host_active) press_void = true; /* the screen can't show what a press does */
     int64_t held = now - press_at;
     if (down) {
-        if (held < 30000) return NULL; /* debounce */
+        if (held < 30000 || press_void) return NULL; /* debounce */
         return held >= HOLD_FLIP_US ? "release: flip screen" : held >= HOLD_PAGE_US ? "release: next page" : NULL;
     }
     press_at = 0;
+    if (press_void) {press_void = false; return NULL;}
     if (held < 30000) return NULL;
     if (help) {help = false; hint_until = now + HINT_US; return NULL;}
     if (held >= HOLD_FLIP_US) {cfg.flip = !cfg.flip; td_lcd_flip(cfg.flip); changed();}
@@ -427,7 +451,7 @@ void board_ui_init(void) {
 bool board_ui_step(bool host_active) {
     if (!ok) return false;
     int64_t now = esp_timer_get_time();
-    const char *holding = button(now);
+    const char *holding = button(now, host_active);
     if (save_at && now >= save_at) {
         save_at = 0;
         nvs_handle_t h;
@@ -436,8 +460,8 @@ bool board_ui_step(bool host_active) {
         }
     }
     if (host_active) {
-        if (!host_shown) {host_shown = true; draw_host(); td_led_set(120, 0, 255, 2);}
-        tuned = 0; /* the host may retune */
+        if (!host_shown) {host_shown = true; draw_host(false); td_led_set(120, 0, 255, 2);}
+        else if (sdr_local_freq() != host_freq) draw_host(true); /* one 16-row strip */
         return false;
     }
     if (host_shown) {host_shown = false; wf_clear = true; next_frame = 0;}
