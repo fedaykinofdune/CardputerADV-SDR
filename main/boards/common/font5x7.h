@@ -2,7 +2,7 @@
  * From the classic Adafruit GFX glcdfont (BSD license, (c) 2012 Adafruit Industries). */
 #pragma once
 #include <stdint.h>
-static const uint8_t cp_font5x7[95][5] = {
+static const uint8_t sv_font5x7[95][5] = {
     {0x00,0x00,0x00,0x00,0x00}, /*   */
     {0x00,0x00,0x5f,0x00,0x00}, /* ! */
     {0x00,0x07,0x00,0x07,0x00}, /* " */

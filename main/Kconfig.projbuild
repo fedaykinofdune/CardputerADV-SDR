@@ -58,15 +58,38 @@ endmenu
 
 menu "ESP-SDR board"
 
-    config ESP_SDR_CARDPUTER
-        bool "M5Stack Cardputer ADV display and keyboard UI"
-        depends on IDF_TARGET_ESP32S3
-        default n
+    choice ESP_SDR_BOARD
+        prompt "On-device UI board"
+        default ESP_SDR_BOARD_NONE
         help
-            Adds a standalone spectrum and waterfall view on the Cardputer ADV
-            ST7789 display, controlled from its TCA8418 keyboard. The display
-            runs between serial commands and pauses while a USB host holds the
-            serial lease, so host tools keep working. Reserves the board's
-            display, keyboard, SD and audio pins.
+            Adds a standalone spectrum view on a board's own display. The UI
+            runs between serial commands and pauses while a USB host holds
+            the serial lease, so host tools keep working.
+
+        config ESP_SDR_BOARD_NONE
+            bool "None (host tools only)"
+
+        config ESP_SDR_CARDPUTER
+            bool "M5Stack Cardputer ADV display, keyboard and speaker UI"
+            depends on IDF_TARGET_ESP32S3
+            help
+                Spectrum and waterfall on the Cardputer ADV ST7789 display,
+                controlled from its TCA8418 keyboard, plus listen mode on the
+                ES8311 speaker. Reserves the board's display, keyboard, SD and
+                audio pins.
+
+        config ESP_SDR_TDONGLE
+            bool "LilyGO T-Dongle S3 display, button and LED UI"
+            depends on IDF_TARGET_ESP32S3
+            help
+                Spectrum, Wi-Fi channel survey and signal hunter pages on the
+                T-Dongle S3 ST7735 display, driven by its single BOOT button,
+                with the APA102 LED as an activity light. Reserves the board's
+                display, LED and SD pins.
+    endchoice
+
+    config ESP_SDR_LOCAL_UI
+        bool
+        default y if ESP_SDR_CARDPUTER || ESP_SDR_TDONGLE
 
 endmenu

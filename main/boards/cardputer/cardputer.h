@@ -2,25 +2,9 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
-#include "ring_capture.h"
 
-/* Receiver services (targets/esp32s3/receiver.c). */
-const uint32_t *sdr_local_capture(unsigned n, unsigned divider);
-unsigned sdr_local_freq(void);
-void sdr_local_tune(unsigned mhz); /* also clears any kHz offset */
-void sdr_local_tune_khz(unsigned khz);
-void sdr_local_iq_run(const ring_config_t *c, ring_result_t *r);
-int sdr_local_gain(void); /* -1: hardware AGC */
-unsigned sdr_local_gain_max(void);
-void sdr_local_set_gain(int code);
-unsigned sdr_local_bandwidth(void); /* MHz, 0: automatic */
-void sdr_local_set_bandwidth(unsigned mhz);
-
-/* UI entry points. cardputer_init() runs before GPIO discovery so the board
- * pins stay reserved; cardputer_step() runs one frame in the idle slot and
- * returns false when it did nothing (the caller then yields). */
-void cardputer_init(void);
-bool cardputer_step(bool host_active);
+#include "sdr_local.h"
+#include "sdr_view.h"
 
 /* Board drivers. */
 #define CP_LCD_W 240
@@ -50,8 +34,8 @@ bool cp_listen_active(void);
 void cp_listen_step(bool host_active);
 
 /* Shared with listen.c (ui.c). */
-void cp_fill(uint16_t *buf, int w, int h, uint16_t c);
-void cp_text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg, int scale);
+#define cp_fill sv_fill
+#define cp_text sv_text
 void cp_ui_help(const char *const *lines, int n);
 void cp_ui_frozen(unsigned listen_khz); /* last spectrum, marker at the listen frequency */
 void cp_ui_resume(void);                /* listen mode ended: back to the live spectrum */
@@ -75,7 +59,4 @@ int cp_kbd_read(void);
 #define CP_KEY_DEL 0x104
 
 /* Big-endian RGB565 for the ST7789 byte stream. */
-static inline uint16_t cp_rgb(unsigned r, unsigned g, unsigned b) {
-    uint16_t c = (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
-    return (uint16_t)((c >> 8) | (c << 8));
-}
+#define cp_rgb sv_rgb

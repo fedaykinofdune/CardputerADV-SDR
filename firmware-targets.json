@@ -60,6 +60,16 @@
       "launcher_image": true
     },
     {
+      "id": "tdongle-s3",
+      "target": "esp32s3",
+      "label": "LilyGO T-Dongle S3 (ESP32-S3, on-device spectrum, Wi-Fi survey, signal hunter)",
+      "idf_ref": "25fe69f946311abdaf9ad56591f25fedbc20ac98",
+      "allow_larger_flash": true,
+      "preview": true,
+      "sdkconfig": "sdkconfig.defaults.tdongle-s3",
+      "launcher_image": true
+    },
+    {
       "id": "esp32s31",
       "target": "esp32s31",
       "label": "ESP32-S31 (2 MB or larger)",

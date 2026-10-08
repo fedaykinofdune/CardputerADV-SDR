@@ -26,8 +26,8 @@
 #include "rx_lo.h"
 #include "esp_rom_sys.h"
 #include "ring_capture.h"
-#if CONFIG_ESP_SDR_CARDPUTER
-#include "cardputer.h"
+#if CONFIG_ESP_SDR_LOCAL_UI
+#include "sdr_local.h"
 #endif
 
 /* Vendor S3 adctrig uses the 64 KiB aperture at 0x3fcd0000 (MAC_DUMP_USAGE=4).
@@ -78,7 +78,7 @@ enum { rx_source=0,rx_mode=0,rx_flag=0,rx_wide=0,rx_prep=3,rx_pack=0,rx_agc=0 };
 #endif
 extern void force_rx_gain(unsigned,unsigned,unsigned);
 static int rx_filter=-1; /* -1 restores the PHY-calibrated automatic mode. */
-#if CONFIG_ESP_SDR_CARDPUTER
+#if CONFIG_ESP_SDR_LOCAL_UI
 static unsigned rx_filter_mhz;
 #endif
 extern unsigned rom_chip_i2c_readReg(unsigned,unsigned,unsigned);
@@ -214,9 +214,10 @@ static bool capture(unsigned n,unsigned divider,unsigned format) {
     return send_bytes(h,strlen(h)) && send_bytes(IQ_BUFFER,bytes);
 }
 
-#if CONFIG_ESP_SDR_CARDPUTER
-/* Services for the on-device Cardputer UI. It runs in the command loop's
- * idle slot, so it never overlaps a host transaction. */
+#if CONFIG_ESP_SDR_LOCAL_UI
+/* Services for on-device board UIs (Cardputer ADV, T-Dongle S3). The UI
+ * runs in the command loop's idle slot, so it never overlaps a host
+ * transaction. */
 const uint32_t *sdr_local_capture(unsigned n,unsigned divider) {
     uint32_t elapsed;
     if(n<256 || n>IQ_WORDS || capture_raw(n,divider,&elapsed))return NULL;
@@ -414,7 +415,7 @@ static void handle_command(char *line) {
         }
         else if(sscanf(line,"BANDWIDTH %u %c",&n,&extra)==1 && (!n || (n>=RX_BANDWIDTH_MIN && n<=RX_BANDWIDTH_MAX))) {
             rx_filter=rx_bandwidth_dcap(n);
-#if CONFIG_ESP_SDR_CARDPUTER
+#if CONFIG_ESP_SDR_LOCAL_UI
             rx_filter_mhz=n;
 #endif
             reply("OK\n");
@@ -480,9 +481,9 @@ void app_main(void) {
     /* USB may be unplugged when the host uses the UART bridge. */
     (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
-#if CONFIG_ESP_SDR_CARDPUTER
-    /* Claims the display/keyboard pins before GPIO discovery parks the rest. */
-    cardputer_init();
+#if CONFIG_ESP_SDR_LOCAL_UI
+    /* Claims the board's display/input pins before GPIO discovery parks the rest. */
+    board_ui_init();
 #endif
     burst_serial_init();
     ring_capture_init();
@@ -493,9 +494,9 @@ void app_main(void) {
         if(esp_timer_get_time()>=lease_deadline)owner=-1;
         int status=burst_serial_poll_line(line,sizeof(line));
         if(!status) {
-#if CONFIG_ESP_SDR_CARDPUTER
+#if CONFIG_ESP_SDR_LOCAL_UI
             /* The display runs between commands and pauses while a host holds the lease. */
-            if(cardputer_step(owner>=0))continue;
+            if(board_ui_step(owner>=0))continue;
 #endif
             vTaskDelay(1);continue;
         }

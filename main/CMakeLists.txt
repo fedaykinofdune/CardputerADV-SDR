@@ -64,14 +64,23 @@ endif()
 
 set(board_includes)
 if(IDF_TARGET STREQUAL "esp32s3")
-    # Cardputer ADV UI drivers. Requirements are resolved before Kconfig
-    # values exist, so list them for every S3 build; unused code is dropped.
+    # Board UI drivers (Cardputer ADV, T-Dongle S3). Requirements are resolved
+    # before Kconfig values exist, so list them for every S3 build; unused
+    # code is dropped.
     list(APPEND dependencies esp_lcd esp_driver_spi esp_driver_i2c esp_driver_i2s)
+endif()
+if(CONFIG_ESP_SDR_LOCAL_UI)
+    list(APPEND sources "boards/common/sdr_view.c")
+    list(APPEND board_includes "boards/common")
 endif()
 if(CONFIG_ESP_SDR_CARDPUTER)
     list(APPEND sources "boards/cardputer/ui.c" "boards/cardputer/lcd.c" "boards/cardputer/kbd.c"
                         "boards/cardputer/audio.c" "boards/cardputer/listen.c")
     list(APPEND board_includes "boards/cardputer")
+endif()
+if(CONFIG_ESP_SDR_TDONGLE)
+    list(APPEND sources "boards/tdongle/ui.c" "boards/tdongle/lcd.c" "boards/tdongle/io.c")
+    list(APPEND board_includes "boards/tdongle")
 endif()
 
 idf_component_register(SRCS "${receiver}" ${sources}
@@ -86,6 +95,8 @@ set(version_header "${CMAKE_CURRENT_BINARY_DIR}/generated/build_version.h")
 set(version_profile "${IDF_TARGET}")
 if(CONFIG_ESP_SDR_CARDPUTER)
     set(version_profile "cardputer-adv")
+elseif(CONFIG_ESP_SDR_TDONGLE)
+    set(version_profile "tdongle-s3")
 endif()
 add_custom_target(esp_sdr_build_version
     COMMAND "${version_python}" "${PROJECT_DIR}/tools/generate_version.py"

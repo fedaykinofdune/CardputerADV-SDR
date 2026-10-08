@@ -37,7 +37,7 @@ def firmware_version(data):
         datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ')
         if value['build_date'] != stamp[:10] or not re.fullmatch(r'(?:[a-f0-9]{40}(?:-dirty)?|unknown)', value['revision']):
             raise ValueError('Invalid firmware metadata')
-        if not re.fullmatch(r'esp32[a-z0-9]*|cardputer-adv', value['profile']):
+        if not re.fullmatch(r'esp32[a-z0-9]*|cardputer-adv|tdongle-s3', value['profile']):
             raise ValueError('Invalid firmware profile')
         return value
     except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:

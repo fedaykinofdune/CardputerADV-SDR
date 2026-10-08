@@ -1,7 +1,7 @@
 /* Cardputer ADV on-device receiver: spectrum + waterfall from burst captures.
  *
- * Each frame takes one snapshot (SEGMENTS x FFT_N samples), averages the
- * Hann-windowed FFT powers (Welch) and draws them. The UI only runs in the
+ * Each frame takes one snapshot (sdr_view.c: Welch-averaged Hann FFTs of a
+ * burst capture) and draws it. The UI only runs in the
  * command loop's idle slot and pauses while a USB host holds the serial
  * lease, so the browser viewer and host tools keep working unchanged.
  * Listen mode (listen.c) takes over the loop while it plays audio. */
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cardputer.h"
-#include "font5x7.h"
+#include "sdr_view.h"
 #include "esp_private/esp_gpio_reserve.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -20,10 +20,7 @@
 #include "nvs.h"
 #include "ring_capture.h"
 
-#define FFT_N 256
-#define FFT_LOG2 8
-#define SEGMENTS 16
-#define BIN0 ((FFT_N - CP_LCD_W) / 2) /* drop the filtered band edges */
+_Static_assert(CP_LCD_W == SV_BINS, "one spectrum bin per display column");
 
 /* Screen layout (240 x 135). */
 #define STATUS_Y 0
@@ -39,7 +36,7 @@
 #define KEY_US 15000
 #define SAVE_US 3000000
 
-static const struct { unsigned divider, msps; } spans[] = {{0, 80}, {1, 40}, {6, 16}};
+#define spans sv_spans
 static const unsigned steps[] = {1, 2, 5, 10, 20};
 
 /* Persistent settings. */
@@ -57,7 +54,7 @@ static const char *note; /* one-off status message */
 static int64_t note_until;
 static unsigned listen_mark; /* kHz, 0: none */
 static int64_t next_frame, next_key, save_at;
-static float *win, *re, *im, *tw_re, *tw_im, *acc, *spec, *peak;
+static float *spec, *peak, *scratch;
 static uint8_t *wf;
 static unsigned wf_top; /* ring index of the newest waterfall row */
 static uint16_t lut[256];
@@ -65,138 +62,32 @@ static char status_line[48], entry[8];
 static enum { MODE_RUN, MODE_FREQ, MODE_QUIT } mode;
 
 /* ---------- drawing helpers into the DMA strip ---------- */
-void cp_fill(uint16_t *buf, int w, int h, uint16_t c) {
-    for (int i = 0; i < w * h; i++) buf[i] = c;
-}
-/* 5x7 glyphs in a 6x8 cell, scaled up by an integer factor. */
-void cp_text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg, int scale) {
-    for (; *s; s++, x += 6 * scale) {
-        unsigned ch = (unsigned char)*s;
-        if (ch < 0x20 || ch > 0x7e) ch = '?';
-        if (y + 8 * scale <= 0 || y >= h) continue;
-        for (int cx = 0; cx < 5 * scale; cx++) {
-            uint8_t col = cp_font5x7[ch - 0x20][cx / scale];
-            for (int cy = 0; cy < 8 * scale; cy++) {
-                int px = x + cx, py = y + cy;
-                if ((col >> (cy / scale)) & 1 && px >= 0 && px < w && py >= 0 && py < h) buf[py * w + px] = fg;
-            }
-        }
-    }
-}
-#define fill cp_fill
+#define fill sv_fill
 static void text(uint16_t *buf, int w, int h, int x, int y, const char *s, uint16_t fg) {
-    cp_text(buf, w, h, x, y, s, fg, 1);
+    sv_text(buf, w, h, x, y, s, fg, 1);
 }
-static int text_w(const char *s) { return (int)strlen(s) * 6; }
+static int text_w(const char *s) { return sv_text_w(s, 1); }
 
-/* Black - blue - cyan - yellow - red - white. */
-static void build_lut(void) {
-    static const uint8_t stops[][3] = {{0, 0, 0}, {0, 0, 140}, {0, 170, 220}, {240, 230, 0}, {255, 40, 0}, {255, 255, 255}};
-    for (int i = 0; i < 256; i++) {
-        float t = i / 255.0f * 5;
-        int s = (int)t;
-        if (s > 4) s = 4;
-        float f = t - s;
-        lut[i] = cp_rgb((unsigned)(stops[s][0] + (stops[s + 1][0] - stops[s][0]) * f),
-                        (unsigned)(stops[s][1] + (stops[s + 1][1] - stops[s][1]) * f),
-                        (unsigned)(stops[s][2] + (stops[s + 1][2] - stops[s][2]) * f));
-    }
-}
 
-/* ---------- DSP ---------- */
-static void fft_init(void) {
-    float sum = 0;
-    for (int n = 0; n < FFT_N; n++) {
-        win[n] = 0.5f - 0.5f * cosf(2 * (float)M_PI * n / FFT_N);
-        sum += win[n];
-    }
-    /* Normalise so a full-scale tone reads 0 dBFS (10-bit samples). */
-    for (int n = 0; n < FFT_N; n++) win[n] /= sum * 512.0f;
-    for (int k = 0; k < FFT_N / 2; k++) {
-        tw_re[k] = cosf(2 * (float)M_PI * k / FFT_N);
-        tw_im[k] = -sinf(2 * (float)M_PI * k / FFT_N);
-    }
-}
-static void fft(void) {
-    for (unsigned i = 1, j = 0; i < FFT_N; i++) {
-        unsigned bit = FFT_N >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            float t = re[i]; re[i] = re[j]; re[j] = t;
-            t = im[i]; im[i] = im[j]; im[j] = t;
-        }
-    }
-    for (unsigned len = 2; len <= FFT_N; len <<= 1) {
-        unsigned half = len >> 1, stride = FFT_N / len;
-        for (unsigned i = 0; i < FFT_N; i += len)
-            for (unsigned k = 0; k < half; k++) {
-                float wr = tw_re[k * stride], wi = tw_im[k * stride];
-                unsigned a = i + k, b = a + half;
-                float tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
-                re[b] = re[a] - tr; im[b] = im[a] - ti;
-                re[a] += tr; im[a] += ti;
-            }
-    }
-}
-static inline int s10(uint32_t v) { return (int)(v << 22) >> 22; }
 
 /* One capture -> spec[] in dBFS per display column. */
 static bool measure(void) {
-    const uint32_t *w = sdr_local_capture(FFT_N * SEGMENTS, spans[cfg.span].divider);
-    if (!w) return false;
-    memset(acc, 0, FFT_N * sizeof(float));
-    for (int s = 0; s < SEGMENTS; s++) {
-        const uint32_t *p = w + s * FFT_N;
-        /* The LO leaks a DC offset; removing each segment's mean takes it
-         * out without notching real signals at the centre frequency. */
-        int si = 0, sq = 0;
-        if (cfg.dc_fix)
-            for (int n = 0; n < FFT_N; n++) {si += s10(p[n]); sq += s10(p[n] >> 10);}
-        float mi = (float)si / FFT_N, mq = (float)sq / FFT_N;
-        for (int n = 0; n < FFT_N; n++) {
-            /* Conjugate: on the S3, RF above the LO arrives at negative
-             * frequency (the web viewer and bridge do the same). */
-            re[n] = (s10(p[n]) - mi) * win[n];
-            im[n] = (mq - s10(p[n] >> 10)) * win[n];
-        }
-        fft();
-        for (int k = 0; k < FFT_N; k++) acc[k] += re[k] * re[k] + im[k] * im[k];
-    }
+    const float *db = sv_measure(cfg.span, cfg.dc_fix);
+    if (!db) return false;
     static const float alpha[] = {1.0f, 0.5f, 0.3f, 0.15f};
     float a = alpha[cfg.avg & 3];
     for (int x = 0; x < CP_LCD_W; x++) {
-        int k = (x + BIN0 + FFT_N / 2) & (FFT_N - 1); /* fftshift */
-        float db = 10 * log10f(acc[k] / SEGMENTS + 1e-12f);
-        spec[x] = isfinite(spec[x]) && a < 1 ? spec[x] + a * (db - spec[x]) : db;
+        spec[x] = isfinite(spec[x]) && a < 1 ? spec[x] + a * (db[x] - spec[x]) : db[x];
         if (!peak_hold || !isfinite(peak[x]) || spec[x] > peak[x]) peak[x] = spec[x];
         else peak[x] -= 0.15f; /* slow decay */
     }
     return true;
 }
 
-static void autoscale(void) {
-    float lo = 0, hi = -200;
-    float sorted[CP_LCD_W];
-    memcpy(sorted, spec, sizeof(sorted));
-    /* Median-ish noise floor via partial selection. */
-    for (int i = 0; i <= CP_LCD_W / 2; i++)
-        for (int j = i + 1; j < CP_LCD_W; j++)
-            if (sorted[j] < sorted[i]) {float t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t;}
-    lo = sorted[CP_LCD_W / 2];
-    for (int x = 0; x < CP_LCD_W; x++) if (spec[x] > hi) hi = spec[x];
-    int ref = (int)ceilf((hi + 6) / 5) * 5, bottom = (int)floorf((lo - 8) / 5) * 5;
-    if (ref - bottom < 30) bottom = ref - 30;
-    if (ref > 10) ref = 10;
-    if (ref < -110) ref = -110;
-    cfg.ref_db = (int8_t)ref;
-    cfg.range_db = (int8_t)(ref - bottom > 100 ? 100 : ref - bottom);
-}
+static void autoscale(void) { sv_autoscale(spec, CP_LCD_W, scratch, &cfg.ref_db, &cfg.range_db); }
 
 /* ---------- screens ---------- */
-static float column_mhz(int x) {
-    return cfg.freq + (x + BIN0 - FFT_N / 2) * (float)spans[cfg.span].msps / FFT_N;
-}
+static float column_mhz(int x) { return sv_bin_mhz(cfg.freq, cfg.span, (float)x); }
 
 static void draw_status(bool host) {
     char line[48], gain[8];
@@ -248,7 +139,7 @@ static void draw_spectrum(void) {
     int mx = 0;
     for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
     /* Listen frequency, when listen mode is on. */
-    int lx = listen_mark ? (int)lroundf((listen_mark / 1000.0f - cfg.freq) * FFT_N / spans[cfg.span].msps) + FFT_N / 2 - BIN0 : -1;
+    int lx = listen_mark ? (int)lroundf(sv_mhz_bin(cfg.freq, cfg.span, listen_mark / 1000.0f)) : -1;
     uint16_t *b = cp_lcd_strip();
     for (int y0 = 0; y0 < SPEC_H; y0 += CP_STRIP_H) {
         int h = SPEC_H - y0 < CP_STRIP_H ? SPEC_H - y0 : CP_STRIP_H;
@@ -462,23 +353,21 @@ static void key(int k) {
 }
 
 /* ---------- entry points ---------- */
-void cardputer_init(void) {
+void board_ui_init(void) {
     /* LCD, backlight, I2C, keyboard IRQ, SD and audio pins stay out of the
      * host-controllable GPIO set. */
     esp_gpio_reserve(BIT64(8) | BIT64(9) | BIT64(11) | BIT64(12) | BIT64(14) | BIT64(33) | BIT64(34) |
                      BIT64(35) | BIT64(36) | BIT64(37) | BIT64(38) | BIT64(39) | BIT64(40) | BIT64(41) |
                      BIT64(42) | BIT64(43) | BIT64(44) | BIT64(46));
-    size_t f = FFT_N * sizeof(float);
-    win = malloc(f); re = malloc(f); im = malloc(f); acc = malloc(f);
-    tw_re = malloc(f / 2); tw_im = malloc(f / 2);
     spec = malloc(CP_LCD_W * sizeof(float)); peak = malloc(CP_LCD_W * sizeof(float));
+    scratch = malloc(CP_LCD_W * sizeof(float));
     /* Heap is scarce beside the 192 KiB RF ring, so the waterfall history
      * borrows ring bank 0. Only host-driven RING/SPEC/IQS runs write the
      * banks, and the UI clears the history whenever a host session ends. */
     _Static_assert(WF_H * CP_LCD_W <= 0x10000, "waterfall exceeds one ring bank");
     wf = (uint8_t *)ring_capture_bank(0);
     memset(wf, 0, WF_H * CP_LCD_W);
-    ok = win && re && im && acc && tw_re && tw_im && spec && peak && wf;
+    ok = sv_init() && spec && peak && scratch && wf;
     if (!ok) return;
     nvs_handle_t h;
     size_t len = sizeof(cfg);
@@ -490,8 +379,7 @@ void cardputer_init(void) {
         nvs_close(h);
     }
     for (int x = 0; x < CP_LCD_W; x++) {spec[x] = NAN; peak[x] = NAN;}
-    fft_init();
-    build_lut();
+    sv_waterfall_lut(lut);
     cp_lcd_init();
     cp_lcd_flip(cfg.flip);
     cp_kbd_init();
@@ -501,7 +389,7 @@ void cardputer_init(void) {
     help_drawn = true;
 }
 
-bool cardputer_step(bool host_active) {
+bool board_ui_step(bool host_active) {
     if (!ok) return false;
     if (cp_listen_active()) {cp_listen_step(host_active); return true;}
     int64_t now = esp_timer_get_time();

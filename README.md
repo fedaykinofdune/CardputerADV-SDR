@@ -14,6 +14,13 @@ from this tree; the Cardputer work lives in `main/boards/cardputer/` and the
 `cardputer-adv` build profile. The upstream README is kept as
 [UPSTREAM-README.md](UPSTREAM-README.md).
 
+**Also on the LilyGO T-Dongle S3** (`tdongle-s3` profile,
+`main/boards/tdongle/`): spectrum + waterfall with tap-to-zoom, a Wi-Fi
+channel airtime survey and a transmitter-hunting meter, all driven by its
+single button, with the RGB LED glowing by signal strength. See
+[docs/tdongle-s3.md](docs/tdongle-s3.md). The FFT and drawing code both boards
+share lives in `main/boards/common/`.
+
 ## What it does
 
 - **Spectrum + waterfall** at 80, 40 or 16 MHz span, 100–6000 MHz tuning
@@ -47,7 +54,8 @@ python tools/build_firmware.py --profile cardputer-adv --version local --output 
 ```
 
 Keys, screen layout, listen mode details and hardware notes:
-[docs/cardputer-adv.md](docs/cardputer-adv.md).
+[docs/cardputer-adv.md](docs/cardputer-adv.md). For the T-Dongle S3, build
+`--profile tdongle-s3` and see [docs/tdongle-s3.md](docs/tdongle-s3.md).
 
 ## License
 
