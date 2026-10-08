@@ -54,7 +54,7 @@ static const char *note; /* one-off status message */
 static int64_t note_until;
 static unsigned listen_mark; /* kHz, 0: none */
 static int64_t next_frame, next_key, save_at;
-static float *spec, *peak, *scratch;
+static float *spec, *peak;
 static uint8_t *wf;
 static unsigned wf_top; /* ring index of the newest waterfall row */
 static uint16_t lut[256];
@@ -84,7 +84,10 @@ static bool measure(void) {
     return true;
 }
 
-static void autoscale(void) { sv_autoscale(spec, CP_LCD_W, scratch, &cfg.ref_db, &cfg.range_db); }
+static void autoscale(void) {
+    float scratch[CP_LCD_W]; /* stack, not heap: listen mode needs the heap */
+    sv_autoscale(spec, CP_LCD_W, scratch, &cfg.ref_db, &cfg.range_db);
+}
 
 /* ---------- screens ---------- */
 static float column_mhz(int x) { return sv_bin_mhz(cfg.freq, cfg.span, (float)x); }
@@ -258,11 +261,19 @@ void cp_ui_resume(void) {
 
 static void say(const char *s) { note = s; note_until = esp_timer_get_time() + 3000000; }
 
+/* The I2S ring comes from the internal DMA heap; show what was left. */
+static void say_speaker_failed(void) {
+    static char s[40];
+    snprintf(s, sizeof(s), "Speaker init failed, dma %u/%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+    say(s);
+}
+
 static void listen(void) {
     int mx = 0;
     for (int x = 1; x < CP_LCD_W; x++) if (spec[x] > spec[mx]) mx = x;
     float mhz = marker && isfinite(spec[mx]) ? column_mhz(mx) : (float)cfg.freq;
-    if (!cp_listen_enter((unsigned)lroundf(mhz * 1000))) say("Speaker init failed");
+    if (!cp_listen_enter((unsigned)lroundf(mhz * 1000))) say_speaker_failed();
     status_line[0] = 0;
 }
 
@@ -345,7 +356,7 @@ static void key(int k) {
     case 'l': listen(); break;
     case 'n':
         sniff = !sniff;
-        if (sniff && !cp_audio_start()) {sniff = false; say("Speaker init failed");}
+        if (sniff && !cp_audio_start()) {sniff = false; say_speaker_failed();}
         if (!sniff) cp_audio_stop();
         sniff_cycles = -1;
         break;
@@ -360,14 +371,13 @@ void board_ui_init(void) {
                      BIT64(35) | BIT64(36) | BIT64(37) | BIT64(38) | BIT64(39) | BIT64(40) | BIT64(41) |
                      BIT64(42) | BIT64(43) | BIT64(44) | BIT64(46));
     spec = malloc(CP_LCD_W * sizeof(float)); peak = malloc(CP_LCD_W * sizeof(float));
-    scratch = malloc(CP_LCD_W * sizeof(float));
     /* Heap is scarce beside the 192 KiB RF ring, so the waterfall history
      * borrows ring bank 0. Only host-driven RING/SPEC/IQS runs write the
      * banks, and the UI clears the history whenever a host session ends. */
     _Static_assert(WF_H * CP_LCD_W <= 0x10000, "waterfall exceeds one ring bank");
     wf = (uint8_t *)ring_capture_bank(0);
     memset(wf, 0, WF_H * CP_LCD_W);
-    ok = sv_init() && spec && peak && scratch && wf;
+    ok = sv_init() && spec && peak && wf;
     if (!ok) return;
     nvs_handle_t h;
     size_t len = sizeof(cfg);

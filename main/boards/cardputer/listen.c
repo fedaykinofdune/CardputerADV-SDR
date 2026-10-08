@@ -12,6 +12,9 @@
 #include <string.h>
 #include "cardputer.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 
 #define PANEL_H (CP_LCD_H - CP_PANEL_Y)
@@ -38,6 +41,7 @@ static struct {
 } lc = {NFM, 8, 3, 3, 0};
 
 static bool active, loaded, entering, stuck_poll;
+static bool halted; /* captures kept failing: the error stays up until a key */
 static unsigned khz, fails, stuck;
 static char entry[10], msg[40];
 
@@ -75,7 +79,7 @@ IRAM_ATTR static void demod(int32_t i, int32_t q) {
         int32_t mag = ai > aq ? ai + ((aq * 3) >> 3) : aq + ((ai * 3) >> 3);
         dm.amdc += (uint32_t)mag - (dm.amdc >> 11);
         int32_t c = (int32_t)(dm.amdc >> 11);
-        a = c > 16 ? ((mag - c) << 13) / c : 0; /* modulation depth, 100 % = 8192 */
+        a = c > 16 ? (mag - c) * 8192 / c : 0; /* modulation depth, 100 % = 8192 */
         if (a > 32767) a = 32767;
     } else {
         int32_t re = i * dm.pi + q * dm.pq, im = q * dm.pi - i * dm.pq;
@@ -177,7 +181,8 @@ static void draw_panel(void) {
         }
         snprintf(line, sizeof(line), "%.0fdB%s", db, dm.open ? "" : " sq");
         cp_text(b, CP_LCD_W, h, 194, 44 - y0, line, cp_rgb(220, 230, 240), 1);
-        cp_text(b, CP_LCD_W, h, 4, 57 - y0, "l back m mode -= vol []sql ;. step", cp_rgb(100, 110, 140), 1);
+        if (halted) cp_text(b, CP_LCD_W, h, 4, 57 - y0, "capture failed: l back, any key retry", cp_rgb(255, 120, 80), 1);
+        else cp_text(b, CP_LCD_W, h, 4, 57 - y0, "l back m mode -= vol []sql ;. step", cp_rgb(100, 110, 140), 1);
         cp_lcd_blit(0, CP_PANEL_Y + y0, CP_LCD_W, h, b);
     }
 }
@@ -279,7 +284,7 @@ bool cp_listen_enter(unsigned k) {
     }
     if (!cp_audio_start()) return false;
     active = true;
-    entering = help_shown = false;
+    entering = help_shown = halted = false;
     fails = stuck = 0;
     msg[0] = 0;
     demod_setup(true);
@@ -289,8 +294,30 @@ bool cp_listen_enter(unsigned k) {
     return true;
 }
 
+/* Status line text for a failed run, short enough for the 40-column line. */
+static void run_error(const ring_result_t *r) {
+    static const char *const names[] = {"OK", "ARG", "LATE", "AGE", "START", "END", "LEN", "XPORT"};
+    const char *n = r->status < sizeof(names) / sizeof(names[0]) ? names[r->status] : "?";
+    if (r->status == RING_FAIL_ARG) /* allocation-type failures: show the DMA heap */
+        snprintf(msg, sizeof(msg), "IQ %s/%u dma %u/%u", n, (unsigned)r->detail,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+    else
+        snprintf(msg, sizeof(msg), "IQ %s/%u u%u L%u %c", n, (unsigned)r->detail, (unsigned)r->units,
+                 (unsigned)r->late_max, ring_capture_dual_active() ? 'D' : 'S');
+}
+
 void cp_listen_step(bool host_active) {
     if (host_active) {leave(); return;}
+    if (halted) {
+        int k = cp_kbd_read();
+        if (!k) {vTaskDelay(pdMS_TO_TICKS(20)); return;}
+        if (k == 'l' || k == '`' || k == CP_KEY_ESC) {leave(); return;}
+        halted = false; fails = 0; msg[0] = 0; /* any other key: try again */
+        draw_status();
+        draw_panel();
+        return;
+    }
     demod_setup(false);
     /* Open-ended while the key line works (a key ends the run); short runs
      * when the meter should move or keys must be polled. Audio keeps
@@ -306,8 +333,9 @@ void cp_listen_step(bool host_active) {
     cp_audio_pause();
     if (r.stopped_by_host) {leave(); return;}
     if (r.status != RING_OK) {
-        snprintf(msg, sizeof(msg), "IQ run error %u/%u", (unsigned)r.status, (unsigned)r.detail);
-        if (++fails >= 10) {leave(); return;}
+        run_error(&r);
+        /* Keep the reason on screen (it used to flash and vanish). */
+        if (++fails >= 10) {halted = true; draw_status(); draw_panel(); return;}
     } else fails = 0;
     bool any = false;
     for (int k; active && (k = cp_kbd_read());) {key(k); any = true;}

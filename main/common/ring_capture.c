@@ -638,7 +638,8 @@ RING_HOT static void unit_done(void) {
 #define IQS_MAGIC 0x31535149u /* "IQS1" */
 #define IQS_PAYLOAD 1024u
 #define IQS_CHUNK 512u
-/* heap, not BSS: BSS must end below the RF ring (sram_guard.ld) */
+/* Frame and FIR buffers borrow fft_buf (fir_alloc), not new BSS: BSS must
+ * end below the RF ring (sram_guard.ld). */
 static uint32_t iqs_cost;
 static uint64_t iqs_cyc, iqs_done;
 typedef struct __attribute__((packed)) {
@@ -702,7 +703,20 @@ static float fir_tap(uint32_t i, uint32_t L, float fc) {
     float r = 2.0f * m / (float)(L - 1);
     return 2.0f * fc * sinc * fir_i0(5.65f * sqrtf(fmaxf(0.0f, 1.0f - r * r))) / fir_i0(5.65f);
 }
-static void *fir_alloc(size_t n) { return heap_caps_aligned_alloc(16, n, MALLOC_CAP_DMA | MALLOC_CAP_8BIT); }
+/* IQ runs carve their FIR and frame buffers out of fft_buf, which only SPEC
+ * runs use, instead of the heap: on boards whose UI and speaker already hold
+ * most of the internal heap (Cardputer listen mode) the allocations failed
+ * every run with RING_FAIL_ARG 3/4. Worst case (decimation 128..1024):
+ * frame 1056 + outputs 2x160 + stage 1 (64 + 2x1184) + stage 2 (512 + 2x1184). */
+_Static_assert(1056u + 2u * 160u + (64u + 2u * 1184u) + (512u + 2u * 1184u) <= sizeof(fft_buf), "IQ pool");
+static uint8_t *iq_pool, *iq_pool_end;
+static void *fir_alloc(size_t n) {
+    n = (n + 15u) & ~(size_t)15u; /* PIE kernels need 16-byte alignment */
+    if ((size_t)(iq_pool_end - iq_pool) < n) return NULL;
+    void *p = iq_pool;
+    iq_pool += n;
+    return p;
+}
 static bool fstage_init(fstage_t *s, uint32_t D, uint32_t L, uint32_t shift, uint32_t in_max) {
     s->D = D; s->L = L; s->shift = shift; s->cap = 2u * L + in_max + 16u;
     s->h = fir_alloc(2u * L); s->wi = fir_alloc(2u * s->cap); s->wq = fir_alloc(2u * s->cap);
@@ -729,7 +743,7 @@ static bool fstage_init(fstage_t *s, uint32_t D, uint32_t L, uint32_t shift, uin
     for (uint32_t i = 0; i < L; i++) s->h[i] = (int16_t)lrintf(32768.0f * fir_tap(i, L, fc) / sum);
     return true;
 }
-static void fstage_free(fstage_t *s) { free(s->h); free(s->wi); free(s->wq); s->h = s->wi = s->wq = NULL; }
+static void fstage_free(fstage_t *s) { s->h = s->wi = s->wq = NULL; } /* pool memory */
 static void fstage_reset(fstage_t *s, uint64_t start) {
     memset(s->wi, 0, 2u * s->L); memset(s->wq, 0, 2u * s->L);
     s->n = s->L; s->base = start - s->L; s->next_end = start + s->D - 1u;
@@ -786,7 +800,7 @@ IRAM_ATTR static void fir_feed(const uint32_t *p, uint32_t a, uint32_t m) {
     }
 }
 static void fir_reset(uint64_t index) { fstage_reset(&fs1, index); fstage_reset(&fs2, index / 8u); }
-static void fir_free(void) { fstage_free(&fs1); fstage_free(&fs2); free(fir_oi); free(fir_oq); fir_oi = fir_oq = NULL; }
+static void fir_free(void) { fstage_free(&fs1); fstage_free(&fs2); fir_oi = fir_oq = NULL; }
 static bool fir_setup(uint32_t D) {
     if (D < 64u || (D & (D - 1u))) return false;
     uint32_t D2 = D / 8u, L2 = (18u * D2 + 7u) & ~7u;
@@ -1355,10 +1369,10 @@ RING_HOT void ring_capture_run(const ring_config_t *cfg, ring_result_t *r) {
         iqs_sink = cfg->iq_sink;
         fir_rot = cfg->iq_rot;
         iqs.next_pair = ~0ull;
-        if (!iqs.out) {
-            iqs.out = heap_caps_malloc(sizeof(iqs_header_t) + IQS_PAYLOAD + 4, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-            if (!iqs.out) { fail(r, RING_FAIL_ARG, 3); return; }
-        }
+        iq_pool = (uint8_t *)fft_buf;
+        iq_pool_end = iq_pool + sizeof(fft_buf);
+        iqs.out = fir_alloc(sizeof(iqs_header_t) + IQS_PAYLOAD + 4);
+        if (!iqs.out) { fail(r, RING_FAIL_ARG, 3); return; }
         iqs_cost = 8000u;
         if (!fir_setup(d)) { fir_free(); fail(r, RING_FAIL_ARG, 4); return; }
         iqs_cyc = iqs_done = 0;

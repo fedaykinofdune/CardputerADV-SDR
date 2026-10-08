@@ -17,8 +17,9 @@ bool sv_init(void) {
     size_t f = SV_FFT_N * sizeof(float);
     win = malloc(f); re = malloc(f); im = malloc(f); acc = malloc(f);
     tw_re = malloc(f / 2); tw_im = malloc(f / 2);
-    out = malloc(SV_BINS * sizeof(float));
-    if (!(win && re && im && acc && tw_re && tw_im && out)) return false;
+    if (!(win && re && im && acc && tw_re && tw_im)) return false;
+    out = im; /* free once the FFTs are done; the heap is tight on the Cardputer */
+    _Static_assert(SV_BINS <= SV_FFT_N, "output fits the FFT buffer");
     float sum = 0;
     for (int n = 0; n < SV_FFT_N; n++) {
         win[n] = 0.5f - 0.5f * cosf(2 * (float)M_PI * n / SV_FFT_N);
