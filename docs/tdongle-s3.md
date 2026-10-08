@@ -20,9 +20,12 @@ with TFT_eSPI, Zephyr, ESPHome, CircuitPython, espp and Launcher.
   esptool-based flasher. To enter download mode, hold BOOT while plugging the
   dongle in.
 - **Launcher:** Launcher has a T-Dongle S3 build (`lilygo-t-dongle-s3-tft`).
-  Copy the merged `esp-sdr-tdongle-s3.bin` to the TF card and install it from
-  the SD menu, as on the Cardputer. Use the merged image; the app-only image
-  has no bootloader.
+  Copy the merged `esp-sdr-tdongle-s3.bin` to the TF card (the slot inside
+  the USB plug) and install it from the SD menu, as on the Cardputer. Launcher
+  reads the partition table inside the merged image and installs the app from
+  it. In Launcher, click is next, hold is select. To get back to Launcher
+  later, replug the dongle and click during Launcher's start screen; if you
+  don't press anything, esp-sdr boots.
 
 ```sh
 python tools/build_firmware.py --profile tdongle-s3 --version local --output artifacts
